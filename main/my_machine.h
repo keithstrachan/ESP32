@@ -30,13 +30,13 @@
 //#define BOARD_SOURCERABBIT_4AXIS
 //#define BOARD_PROTONEER_3XX
 //#define BOARD_MKS_DLC32_V2P0  // MKS DLC32 and MKS TinyBee boards
-//#define BOARD_MY_MACHINE      // Add my_machine_map.h before enabling this!
+#define BOARD_MY_MACHINE      // Add my_machine_map.h before enabling this!
 
 // Configuration
 // Uncomment to enable, for some a value > 1 may be assigned, if so the default value is shown.
 
 //#define VFD_ENABLE         1 // Set to 1 or 2 for Huanyang VFD spindle. More here https://github.com/grblHAL/Plugins_spindle
-//#define NETWORKING_ENABLE  1 // WiFi streaming. Requires networking plugin.
+#define NETWORKING_ENABLE  1 // WiFi streaming. Requires networking plugin.
 #if NETWORKING_ENABLE
 //#define WIFI_SOFTAP        1 // Use Soft AP mode for WiFi.
 //#define WEBUI_ENABLE       0 // Not yet available, do not change.
@@ -57,14 +57,14 @@
 #ifdef SDCARD_ENABLE
 //#define FTP_ENABLE              1 // Ftp daemon - requires SD card enabled.
 #endif
-//#define NETWORK_HOSTNAME        "grblHAL"
-//#define NETWORK_IPMODE          1 // 0 = static, 1 = DHCP, 2 = AutoIP
-//#define NETWORK_IP              "192.168.5.1"
-//#define NETWORK_GATEWAY         "192.168.5.1"
-//#define NETWORK_MASK            "255.255.255.0"
-//#define NETWORK_TELNET_PORT     23
-//#define NETWORK_WEBSOCKET_PORT  81
-//#define NETWORK_HTTP_PORT       80
+#define NETWORK_HOSTNAME        "grblHAL"
+#define NETWORK_IPMODE          1 // 0 = static, 1 = DHCP, 2 = AutoIP
+#define NETWORK_IP              "10.192.173.149"
+#define NETWORK_GATEWAY         "10.192.172.1"
+#define NETWORK_MASK            "255.255.254.0"
+#define NETWORK_TELNET_PORT     23
+#define NETWORK_WEBSOCKET_PORT  81
+#define NETWORK_HTTP_PORT       80
 
 // WiFi Access Point (AP) settings
 #if WIFI_SOFTAP
