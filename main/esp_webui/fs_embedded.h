@@ -1,9 +1,11 @@
 /*
-  flashfs.h - An embedded CNC Controller with rs274/ngc (g-code) support
+  fs_embedded.h - An embedded CNC Controller with rs274/ngc (g-code) support
+
+  Webserver backend - embedded files for WebUI
 
   Part of grblHAL
 
-  Copyright (c) 2019 Terje Io
+  Copyright (c) 2022 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -19,14 +21,6 @@
   along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef _FLASHFS_H_
-#define _FLASHFS_H_
+#pragma once
 
-#include "driver.h"
-#include "grbl/grbl.h"
-
-void flashfs_init (void);
-void flashfs_reset (void);
-status_code_t flashfs_stream_file (char *filename);
-
-#endif
+void fs_embedded_mount (void);

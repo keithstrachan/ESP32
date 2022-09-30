@@ -29,6 +29,8 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 
 #include "./driver.h"
 #include "esp32-hal-uart.h"
@@ -46,12 +48,12 @@
 
 //#include "grbl_esp32_if/grbl_esp32_if.h"
 
-#include "grbl/limits.h"
 #include "grbl/protocol.h"
 #include "grbl/state_machine.h"
 #include "grbl/motor_pins.h"
+#include "grbl/machine_limits.h"
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 #include "i2s_out.h"
 #endif
 
@@ -59,8 +61,8 @@
 #include "wifi.h"
 #endif
 
-#if WEBUI_ENABLE
-#include "webui/response.h"
+#if ETHERNET_ENABLE
+#include "enet.h"
 #endif
 
 #if BLUETOOTH_ENABLE
@@ -70,6 +72,11 @@
 #if SDCARD_ENABLE
 #include "sdcard/sdcard.h"
 #include "esp_vfs_fat.h"
+#endif
+
+#if LITTLEFS_ENABLE
+#include "littlefs_hal.h"
+#include "sdcard/fs_littlefs.h"
 #endif
 
 #if KEYPAD_ENABLE
@@ -208,7 +215,7 @@ static input_signal_t inputpin[] = {
 
 static output_signal_t outputpin[] =
 {
-#ifndef USE_I2S_OUT
+#if !USE_I2S_OUT
     { .id = Output_StepX,         .pin = X_STEP_PIN,            .group = PinGroup_StepperStep,   .mode = Pin_RMT },
     { .id = Output_StepY,         .pin = Y_STEP_PIN,            .group = PinGroup_StepperStep,   .mode = Pin_RMT },
     { .id = Output_StepZ,         .pin = Z_STEP_PIN,            .group = PinGroup_StepperStep,   .mode = Pin_RMT },
@@ -290,6 +297,9 @@ static output_signal_t outputpin[] =
 #ifdef MOTOR_CSM5_PIN
     { .id = Output_MotorChipSelectM5, .pin = MOTOR_CSM5_PIN,    .group = PinGroup_MotorChipSelect },
 #endif
+#ifdef PIN_NUM_CS
+    { .id = Output_SdCardCS,          .pin = PIN_NUM_CS,        .group = PinGroup_SdCard },
+#endif
 #ifdef MODBUS_DIRECTION_PIN
     { .id = Output_Aux0,          .pin = MODBUS_DIRECTION_PIN,  .group = PinGroup_AuxOutput },
 #endif
@@ -301,7 +311,7 @@ static output_signal_t outputpin[] =
 #endif
 };
 
-static bool IOInitDone = false;
+static bool IOInitDone = false, rtc_started = false;
 static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 #if PROBE_ENABLE
 static probe_state_t probe = {
@@ -313,7 +323,7 @@ static probe_state_t probe = {
 static axes_signals_t motors_1 = {AXES_BITMASK}, motors_2 = {AXES_BITMASK};
 #endif
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 static bool goIdlePending = false;
 static uint32_t i2s_step_length = I2S_OUT_USEC_PER_PULSE, i2s_step_samples = 1;
 #endif
@@ -339,12 +349,24 @@ static bool irq_claim (irq_type_t irq, uint_fast8_t id, irq_callback_ptr handler
 #endif
 
 // Interrupt handler prototypes
+#if ETHERNET_ENABLE
+static void gpio_limit_isr (void *signal);
+static void gpio_control_isr (void *signal);
+static void gpio_aux_isr (void *signal);
+#if MPG_MODE_ENABLE
+static void gpio_mpg_isr (void *signal);
+#endif
+#if I2C_STROBE_ENABLE
+static void gpio_i2c_strobe_isr (void *signal);
+#endif
+#else
 static void gpio_isr (void *arg);
+#endif
 static void stepper_driver_isr (void *arg);
 
 static TimerHandle_t xDelayTimer = NULL, debounceTimer = NULL;
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 
 // Set stepper pulse output pins
 inline __attribute__((always_inline)) IRAM_ATTR static void i2s_set_step_outputs (axes_signals_t step_outbits_1);
@@ -577,7 +599,7 @@ inline IRAM_ATTR static void set_dir_outputs (axes_signals_t dir_outbits)
 #endif
 }
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 
 IRAM_ATTR static void I2S_stepperCyclesPerTick (uint32_t cycles_per_tick)
 {
@@ -609,7 +631,7 @@ static void I2S_stepperWakeUp (void)
 
 #ifdef SQUARING_ENABLED
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 
 // Set stepper pulse output pins
 inline __attribute__((always_inline)) IRAM_ATTR static void i2s_set_step_outputs (axes_signals_t step_outbits_1)
@@ -713,7 +735,7 @@ static void StepperDisableMotors (axes_signals_t axes, squaring_mode_t mode)
 
 #else // SQUARING DISABLED
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 
 // Set stepper pulse output pins
 inline __attribute__((always_inline)) IRAM_ATTR static void i2s_set_step_outputs (axes_signals_t step_outbits)
@@ -847,7 +869,7 @@ IRAM_ATTR static void stepperPulseStart (stepper_t *stepper)
         set_dir_outputs(stepper->dir_outbits);
 
     if(stepper->step_outbits.value) {
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
         uint64_t step_pulse_start_time = esp_timer_get_time();
         i2s_set_step_outputs(stepper->step_outbits);
         while (esp_timer_get_time() - step_pulse_start_time < i2s_step_length) {
@@ -866,7 +888,7 @@ IRAM_ATTR static void stepperGoIdle (bool clear_signals)
     TIMERG0.hw_timer[STEP_TIMER_INDEX].config.enable = 0;
 
     if(clear_signals) {
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
         i2s_set_step_outputs((axes_signals_t){0});
 #else
         set_step_outputs((axes_signals_t){0});
@@ -875,7 +897,7 @@ IRAM_ATTR static void stepperGoIdle (bool clear_signals)
     }
 }
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
 
 void i2s_step_sink (void)
 {
@@ -937,7 +959,7 @@ static void i2s_set_streaming_mode (bool stream)
 // Enable/disable limit pins interrupt
 static void limitsEnable (bool on, bool homing)
 {
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
     i2s_set_streaming_mode(!homing);
 #endif
 
@@ -1034,7 +1056,7 @@ inline IRAM_ATTR static control_signals_t systemGetState (void)
 // and the probing cycle modes for toward-workpiece/away-from-workpiece.
 static void probeConfigure(bool is_probe_away, bool probing)
 {
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
     i2s_set_streaming_mode(!probing);
 #endif
 
@@ -1077,7 +1099,11 @@ IRAM_ATTR inline static void spindle_off (void)
     iopins.spindle_on = settings.spindle.invert.on ? On : Off;
     ioexpand_out(iopins);
 #elif defined(SPINDLE_ENABLE_PIN)
+  #if I2S_SPINDLE
+    DIGITAL_OUT(SPINDLE_ENABLE_PIN, settings.spindle.invert.on ? 1 : 0);
+  #else
     gpio_set_level(SPINDLE_ENABLE_PIN, settings.spindle.invert.on ? 1 : 0);
+  #endif
 #endif
 }
 
@@ -1087,7 +1113,11 @@ IRAM_ATTR inline static void spindle_on (void)
     iopins.spindle_on = settings.spindle.invert.on ? Off : On;
     ioexpand_out(iopins);
 #elif defined(SPINDLE_ENABLE_PIN)
+  #if I2S_SPINDLE
+    DIGITAL_OUT(SPINDLE_ENABLE_PIN, settings.spindle.invert.on ? 0 : 1);
+  #else
     gpio_set_level(SPINDLE_ENABLE_PIN, settings.spindle.invert.on ? 0 : 1);
+  #endif
 #endif
 }
 
@@ -1098,7 +1128,11 @@ IRAM_ATTR inline static void spindle_dir (bool ccw)
         iopins.spindle_dir = (ccw ^ settings.spindle.invert.ccw) ? On : Off;
         ioexpand_out(iopins);
 #elif defined(SPINDLE_DIRECTION_PIN)
-        gpio_set_level(SPINDLE_DIRECTION_PIN, (ccw ^ settings.spindle.invert.ccw) ? 1 : 0);
+  #if I2S_SPINDLE
+    DIGITAL_OUT(SPINDLE_DIRECTION_PIN, (ccw ^ settings.spindle.invert.ccw) ? 1 : 0);
+  #else
+    gpio_set_level(SPINDLE_DIRECTION_PIN, (ccw ^ settings.spindle.invert.ccw) ? 1 : 0);
+  #endif
 #endif
     }
 }
@@ -1122,7 +1156,7 @@ IRAM_ATTR static void spindleSetState (spindle_state_t state, float rpm)
 IRAM_ATTR static void spindle_set_speed (uint_fast16_t pwm_value)
 {
     if (pwm_value == spindle_pwm.off_value) {
-        if(settings.spindle.flags.pwm_action == SpindleAction_DisableWithZeroSPeed)
+        if(settings.spindle.flags.enable_rpm_controlled)
             spindle_off();
 #if PWM_RAMPED
         pwm_ramp.pwm_target = pwm_value;
@@ -1165,11 +1199,18 @@ IRAM_ATTR void __attribute__ ((noinline)) _setSpeed (spindle_state_t state, floa
 
 IRAM_ATTR static void spindleSetStateVariable (spindle_state_t state, float rpm)
 {
-    if (!state.on || memcmp(&rpm, &FZERO, sizeof(float)) == 0) { // rpm == 0.0f cannot be used, causes intermittent panic on soft reset!
-        spindle_set_speed(spindle_pwm.off_value);
-        spindle_off();
-    } else
-        _setSpeed(state, rpm);
+#ifdef SPINDLE_DIRECTION_PIN
+    if(state.on)
+        spindle_dir(state.ccw);
+#endif
+    if(!settings.spindle.flags.enable_rpm_controlled) {
+        if(state.on)
+            spindle_on();
+        else
+            spindle_off();
+    }
+
+    spindle_set_speed(state.on ? spindle_compute_pwm_value(&spindle_pwm, rpm, false) : spindle_pwm.off_value);
 }
 
 #else
@@ -1209,11 +1250,21 @@ static spindle_state_t spindleGetState (void)
 #if IOEXPAND_ENABLE // TODO: read from expander?
     state.on = iopins.spindle_on;
     state.ccw = hal.spindle.cap.direction && iopins.spindle_dir;
-#elif defined(SPINDLE_ENABLE_PIN)
+#else
+ #if defined(SPINDLE_ENABLE_PIN)
+  #if I2S_SPINDLE
+    state.on = DIGITAL_IN(SPINDLE_ENABLE_PIN) != 0;
+  #else
     state.on = gpio_get_level(SPINDLE_ENABLE_PIN) != 0;
-  #if defined(SPINDLE_DIRECTION_PIN)
-    state.ccw = hal.spindle.cap.direction && gpio_get_level(SPINDLE_DIRECTION_PIN) != 0;
   #endif
+ #endif
+ #if defined(SPINDLE_DIRECTION_PIN)
+  #if I2S_SPINDLE
+    state.ccw = DIGITAL_IN(SPINDLE_DIRECTION_PIN) != 0;
+  #else
+    state.ccw = gpio_get_level(SPINDLE_DIRECTION_PIN) != 0;
+  #endif
+ #endif
 #endif
     state.value ^= settings.spindle.invert.mask;
 #ifdef SPINDLEPWMPIN
@@ -1230,7 +1281,7 @@ bool spindleConfig (void)
 {
 #if defined(SPINDLEPWMPIN)
 
-    if((hal.spindle.cap.variable = settings.spindle.rpm_max > settings.spindle.rpm_min)) {
+    if((hal.spindle.cap.variable = !settings.spindle.flags.pwm_disable && settings.spindle.rpm_max > settings.spindle.rpm_min)) {
 
         hal.spindle.set_state = spindleSetStateVariable;
 
@@ -1264,9 +1315,14 @@ bool spindleConfig (void)
 
         ledc_set_freq(ledTimerConfig.speed_mode, ledTimerConfig.timer_num, ledTimerConfig.freq_hz);
 
-    } else
+    } else {
+        if(pwmEnabled)
+            hal.spindle.set_state((spindle_state_t){0}, 0.0f);
 #endif // SPINDLEPWMPIN
         hal.spindle.set_state = spindleSetState;
+    }
+
+    spindle_update_caps(hal.spindle.cap.variable ? &spindle_pwm : NULL);
 
     return true;
 }
@@ -1282,12 +1338,20 @@ IRAM_ATTR static void coolantSetState (coolant_state_t mode)
     iopins.mist_on = mode.mist;
     ioexpand_out(iopins);
 #else
-  #ifdef COOLANT_FLOOD_PIN
+ #ifdef COOLANT_FLOOD_PIN
+  #if I2S_COOLANT
+    DIGITAL_OUT(COOLANT_FLOOD_PIN, mode.flood ? 1 : 0);
+  #else
     gpio_set_level(COOLANT_FLOOD_PIN, mode.flood ? 1 : 0);
   #endif
-  #ifdef COOLANT_MIST_PIN
+ #endif
+ #ifdef COOLANT_MIST_PIN
+  #if I2S_COOLANT
+    DIGITAL_OUT(COOLANT_MIST_PIN, mode.mist ? 1 : 0);
+  #else
     gpio_set_level(COOLANT_MIST_PIN, mode.mist ? 1 : 0);
   #endif
+ #endif
 #endif
 }
 
@@ -1300,12 +1364,20 @@ static coolant_state_t coolantGetState (void)
     state.flood = iopins.flood_on;
     state.mist = iopins.mist_on;
 #else
-  #ifdef COOLANT_FLOOD_PIN
+ #ifdef COOLANT_FLOOD_PIN
+  #if I2S_COOLANT
+    DIGITAL_IN(COOLANT_FLOOD_PIN);
+  #else
     state.flood = gpio_get_level(COOLANT_FLOOD_PIN);
   #endif
-  #ifdef COOLANT_MIST_PIN
+ #endif
+ #ifdef COOLANT_MIST_PIN
+  #if I2S_COOLANT
+    state.mist  = DIGITAL_IN(COOLANT_MIST_PIN);
+  #else
     state.mist  = gpio_get_level(COOLANT_MIST_PIN);
   #endif
+ #endif
 #endif
 
     state.value ^= settings.coolant_invert.mask;
@@ -1378,7 +1450,7 @@ void debounceTimerCallback (TimerHandle_t xTimer)
 //    printf("Debounce %d %d\n", grp, limitsGetState().value);
 
       if(grp & PinGroup_Limit)
-            hal.limits.interrupt_callback(limitsGetState());
+          hal.limits.interrupt_callback(limitsGetState());
 
       if(grp & PinGroup_Control)
           hal.control.interrupt_callback(systemGetState());
@@ -1439,13 +1511,11 @@ static void settings_changed (settings_t *settings)
         // TODO: start/stop services...
 #endif
 
-        stepperEnable(settings->steppers.deenergize);
-
         /*********************
          * Step pulse config *
          *********************/
 
-#ifdef USE_I2S_OUT
+#if USE_I2S_OUT
         i2s_step_length = (uint32_t)(settings->steppers.pulse_microseconds);
         if(i2s_step_length < I2S_OUT_USEC_PER_PULSE)
             i2s_step_length = I2S_OUT_USEC_PER_PULSE;
@@ -1545,6 +1615,9 @@ static void settings_changed (settings_t *settings)
                     pullup = true;
                     signal->invert = false;
                     config.intr_type = GPIO_INTR_ANYEDGE;
+  #if ETHERNET_ENABLE
+                    gpio_isr_handler_add(signal->pin, gpio_mpg_isr, signal);
+  #endif
                     break;
 #endif
 #if I2C_STROBE_ENABLE
@@ -1552,6 +1625,7 @@ static void settings_changed (settings_t *settings)
                     pullup = true;
                     signal->invert = false;
                     config.intr_type = GPIO_INTR_ANYEDGE;
+                    gpio_isr_handler_add(signal->pin, gpio_i2c_strobe_isr, signal);
                     break;
 #endif
                 default:
@@ -1563,11 +1637,18 @@ static void settings_changed (settings_t *settings)
                 case PinGroup_Control:
                 case PinGroup_Limit:
                     signal->irq_mode = signal->invert ? IRQ_Mode_Falling : IRQ_Mode_Rising;
+                    signal->debounce = hal.driver_cap.software_debounce;
+#if ETHERNET_ENABLE
+                    gpio_isr_handler_add(signal->pin, signal->group == PinGroup_Limit ? gpio_limit_isr : gpio_control_isr, signal);
+#endif
                     break;
 
                 case PinGroup_AuxInput:
                     pullup = true;
                     signal->invert = false;
+#if ETHERNET_ENABLE
+                    gpio_isr_handler_add(signal->pin, gpio_aux_isr, signal);
+#endif
                     break;
 
                 default:
@@ -1591,8 +1672,7 @@ static void settings_changed (settings_t *settings)
 
                 gpio_config(&config);
 
-                signal->active   = gpio_get_level(signal->pin) == (signal->invert ? 0 : 1);
-                signal->debounce = hal.driver_cap.software_debounce && !(signal->group == PinGroup_Probe || signal->group == PinGroup_Keypad || signal->group == PinGroup_MPG || signal->group == PinGroup_AuxInput);
+                signal->active = signal->debounce && gpio_get_level(signal->pin) == (signal->invert ? 0 : 1);
             }
         } while(i);
 
@@ -1604,7 +1684,7 @@ static void settings_changed (settings_t *settings)
     }
 }
 
-static void enumeratePins (bool low_level, pin_info_ptr pin_info)
+static void enumeratePins (bool low_level, pin_info_ptr pin_info, void *data)
 {
     static xbar_t pin = {0};
     uint32_t i = sizeof(inputpin) / sizeof(input_signal_t);
@@ -1618,7 +1698,7 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info)
         pin.mode.pwm = pin.group == PinGroup_SpindlePWM;
         pin.description = inputpin[i].description;
 
-        pin_info(&pin);
+        pin_info(&pin, data);
     };
 
     pin.mode.mask = 0;
@@ -1630,7 +1710,7 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info)
         pin.group = outputpin[i].group;
         pin.description = outputpin[i].description;
 
-        pin_info(&pin);
+        pin_info(&pin, data);
     };
 
     periph_signal_t *ppin = periph_pins;
@@ -1642,7 +1722,7 @@ static void enumeratePins (bool low_level, pin_info_ptr pin_info)
         pin.mode = ppin->pin.mode;
         pin.description = ppin->pin.description;
 
-        pin_info(&pin);
+        pin_info(&pin, data);
 
         ppin = ppin->next;
     } while(ppin);
@@ -1741,7 +1821,7 @@ static char *sdcard_mount (FATFS **fs)
             report_message(ret == ESP_FAIL ? "Failed to mount filesystem" : "Failed to initialize SD card", Message_Warning);
     }
 
-    if(fs) {
+    if(card && fs) {
         if(*fs == NULL)
             *fs = malloc(sizeof(FATFS));
 
@@ -1788,7 +1868,8 @@ static bool driver_setup (settings_t *settings)
     uint64_t mask = 0;
     idx = sizeof(outputpin) / sizeof(output_signal_t);
     do {
-        if(outputpin[--idx].mode == Pin_GPIO)
+        idx--;
+        if(outputpin[idx].mode == Pin_GPIO && outputpin[idx].id != Output_SdCardCS)
             mask |= (1ULL << outputpin[idx].pin);
     } while(idx);
 
@@ -1834,7 +1915,11 @@ static bool driver_setup (settings_t *settings)
      *  Control, limit & probe pins dir init  *
      ******************************************/
 
+#if ETHERNET_ENABLE
+    gpio_install_isr_service(0);
+#else
     gpio_isr_register(gpio_isr, NULL, (int)ESP_INTR_FLAG_IRAM, NULL);
+#endif
 
 #if VFD_SPINDLE != 1 && defined(SPINDLEPWMPIN)
 
@@ -1901,10 +1986,6 @@ static bool driver_setup (settings_t *settings)
     ioexpand_init();
 #endif
 
-#if WEBUI_ENABLE
-    webui_init();
-#endif
-
   // Set defaults
 
     IOInitDone = settings->version == 21;
@@ -1912,7 +1993,37 @@ static bool driver_setup (settings_t *settings)
     hal.settings_changed(settings);
     hal.stepper.go_idle(true);
 
+#if ETHERNET_ENABLE
+    enet_start();
+#endif
+
     return IOInitDone;
+}
+
+static bool set_rtc_time (struct tm *time)
+{
+    const struct timezone tz = {
+        .tz_minuteswest = 0,
+        .tz_dsttime = 0
+    };
+    struct timeval t;
+    t.tv_sec = mktime(time);
+    t.tv_usec = 0;
+
+    return (rtc_started = settimeofday(&t, &tz) == 0);
+}
+
+static bool get_rtc_time (struct tm *dt)
+{
+    bool ok = false;
+
+    if(rtc_started) {
+        time_t now;
+        if((ok = time(&now) != (time_t)-1))
+            localtime_r(&now, dt);
+    }
+
+    return ok;
 }
 
 // Initialize HAL pointers, setup serial comms and enable EEPROM
@@ -1921,23 +2032,24 @@ bool driver_init (void)
 {
     // Enable EEPROM and serial port here for Grbl to be able to configure itself and report any errors
 
-    static char idf[48];
-
-    strcpy(idf, esp_get_idf_version());
+    rtc_cpu_freq_config_t cpu;
+    rtc_clk_cpu_freq_get_config(&cpu);
 
     hal.info = "ESP32";
-    hal.driver_version = "220327";
+    hal.driver_version = "220922";
 #ifdef BOARD_NAME
     hal.board = BOARD_NAME;
 #endif
     hal.driver_options = IDF_VER;
     hal.driver_setup = driver_setup;
+    hal.f_mcu = cpu.freq_mhz;
     hal.f_step_timer = rtc_clk_apb_freq_get() / STEPPER_DRIVER_PRESCALER; // 20 MHz
     hal.rx_buffer_size = RX_BUFFER_SIZE;
+    hal.get_free_mem = esp_get_free_heap_size;
     hal.delay_ms = driver_delay_ms;
     hal.settings_changed = settings_changed;
 
-#ifndef USE_I2S_OUT
+#if !USE_I2S_OUT
     hal.stepper.wake_up = stepperWakeUp;
     hal.stepper.go_idle = stepperGoIdle;
     hal.stepper.enable = stepperEnable;
@@ -1974,7 +2086,7 @@ bool driver_init (void)
 
     hal.control.get_state = systemGetState;
 
-//    hal.reboot = esp_restart; crashes the MCU...
+    hal.reboot = esp_restart;
     hal.irq_enable = enable_irq;
     hal.irq_disable = disable_irq;
 #if I2C_STROBE_ENABLE
@@ -1987,6 +2099,9 @@ bool driver_init (void)
     hal.enumerate_pins = enumeratePins;
     hal.periph_port.register_pin = registerPeriphPin;
     hal.periph_port.set_pin_description = setPeriphPinDescription;
+
+    hal.rtc.get_datetime = get_rtc_time;
+    hal.rtc.set_datetime = set_rtc_time;
 
     stream_connect(serialInit(BAUD_RATE));
 
@@ -2097,14 +2212,22 @@ bool driver_init (void)
     wifi_init();
 #endif
 
+#if ETHERNET_ENABLE
+    enet_init();
+#endif
+
 #if BLUETOOTH_ENABLE
     bluetooth_init();
+#endif
+
+#if LITTLEFS_ENABLE
+    fs_littlefs_mount("/littlefs", esp32_littlefs_hal());
 #endif
 
 #include "grbl/plugins_init.h"
 
     // no need to move version check before init - compiler will fail any mismatch for existing entries
-    return hal.version == 9;
+    return hal.version == 10;
 }
 
 /* interrupt handlers */
@@ -2117,6 +2240,60 @@ IRAM_ATTR static void stepper_driver_isr (void *arg)
     
     hal.stepper.interrupt_callback();
 }
+
+#if ETHERNET_ENABLE
+
+IRAM_ATTR static void gpio_limit_isr (void *signal)
+{
+    if(((input_signal_t *)signal)->debounce) {
+        ((input_signal_t *)signal)->active = true;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xTimerStartFromISR(debounceTimer, &xHigherPriorityTaskWoken);
+    } else
+        hal.limits.interrupt_callback(limitsGetState());
+}
+
+IRAM_ATTR static void gpio_control_isr (void *signal)
+{
+    if(((input_signal_t *)signal)->debounce) {
+        ((input_signal_t *)signal)->active = true;
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xTimerStartFromISR(debounceTimer, &xHigherPriorityTaskWoken);
+    } else
+        hal.control.interrupt_callback(systemGetState());
+}
+
+IRAM_ATTR static void gpio_aux_isr (void *signal)
+{
+#ifdef HAS_IOPORTS
+    ioports_event((input_signal_t *)signal);
+#endif
+}
+
+#if MPG_MODE_ENABLE && ETHERNET_ENABLE
+
+IRAM_ATTR static void gpio_mpg_isr (void *signal)
+{
+    static bool mpg_mutex = false;
+
+    if(!mpg_mutex) {
+        mpg_mutex = true;
+        protocol_enqueue_rt_command(modeChange);
+        mpg_mutex = false;
+    }
+}
+
+#endif
+
+#if I2C_STROBE_ENABLE
+IRAM_ATTR static void gpio_i2c_strobe_isr (void *signal)
+{
+    if(i2c_strobe.callback)
+        i2c_strobe.callback(0, gpio_get_level(I2C_STROBE_PIN));
+}
+#endif
+
+#else
 
   //GPIO intr process
 IRAM_ATTR static void gpio_isr (void *arg)
@@ -2175,3 +2352,5 @@ IRAM_ATTR static void gpio_isr (void *arg)
         i2c_strobe.callback(0, gpio_get_level(I2C_STROBE_PIN));
 #endif
 }
+
+#endif

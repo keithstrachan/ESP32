@@ -1,11 +1,9 @@
 /*
-  webui/response.h - An embedded CNC Controller with rs274/ngc (g-code) support
-
-  WebUI backend for https://github.com/luc-github/ESP3D-webui
+  fs_spiffs.h - VFS mount for spiffs
 
   Part of grblHAL
 
-  Copyright (c) 2019 Terje Io
+  Copyright (c) 2022 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -21,17 +19,4 @@
   along with Grbl.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef __WEBUI_RESPONSE_H__
-#define __WEBUI_RESPONSE_H__
-
-#include <esp_http_server.h>
-
-void webui_init (void);
-void webui_print (const char *s);
-void webui_print_chunk (const char *s);
-void webui_print_flush (void);
-void webui_print_is_json (void);
-void webui_set_http_request (httpd_req_t *req);
-
-#endif
-
+void fs_spiffs_mount (void);
