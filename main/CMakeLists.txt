@@ -3,8 +3,9 @@
 # NOTE: Only one board may be enabled!
 # If none is enabled pin mappings from generic_map.h will be used.
 
+OPTION(BOARD_BLACKBOX_X32 "Compile for BlackBox X32" OFF)
 OPTION(BOARD_BDRING_V3P5 "Compile for v3.5 3-axis board" OFF)
-OPTION(BOARD_BDRING_V4 "Compile for bdring v4 3-axis board" ON)
+OPTION(BOARD_BDRING_V4 "Compile for bdring v4 3-axis board" OFF)
 OPTION(BOARD_BDRING_I2S6A "Compile for bdring 6-axis I2S board - untested!" OFF)
 OPTION(BOARD_CNC_BOOSTERPACK "Compile for CNC BoosterPack" OFF)
 OPTION(BOARD_ESPDUINO32 "Compile for ESPDUINO-32 Wemos D1 R32" OFF)
@@ -38,6 +39,8 @@ OPTION(Bluetooth "Bluetooth" OFF)
 OPTION(SoftAP "Enable soft AP mode" OFF) # WiFi only
 OPTION(FtpDaemon "Enable ftp daemon" OFF) # Requires SDcard On
 OPTION(WebDAV "Enable WebDAV protocol" OFF) # Requires SDcard On
+OPTION(mDNS "Enable mDNS protocol" OFF)
+OPTION(SSDP "Enable SSDP protocol" OFF)
 OPTION(WebUI "WebUI services" OFF)
 OPTION(WebAuth "WebUI authentication" OFF)
 
@@ -91,11 +94,17 @@ set(WEBUI_SOURCE
 set(BLUETOOTH_SOURCE
  bluetooth.c
 )
-set(HUANYANG_SOURCE
+set(MODBUS_SOURCE
  spindle/modbus
+)
+set(SPINDLE_SOURCE
  spindle/select.c
- spindle/vfd/spindle.c
+ spindle/vfd/gs20.c
+ spindle/vfd/h100.c
  spindle/vfd/huanyang.c
+ spindle/vfd/modvfd.c
+ spindle/vfd/spindle.c
+ spindle/vfd/yl620.c
 )
 set(EEPROM_SOURCE
  eeprom/eeprom_24LC16B.c
@@ -128,6 +137,7 @@ set(NETWORKING_SOURCE
  networking/fs_ram.c
  networking/fs_stream.c
  networking/webdav.c
+ networking/ssdp.c
 )
 set(TRINAMIC_SPI_SOURCE
  spi.c
@@ -200,53 +210,56 @@ set(SRCS
  sdcard/fs_littlefs.c
 )
 
-if(Wifi)
+if(Wifi OR WIFI_ENABLE EQUAL 1)
 list (APPEND SRCS ${WIFI_SOURCE})
 endif()
 
-if(Ethernet)
+if(Ethernet OR ETHERNET_ENABLE EQUAL 1)
 list (APPEND SRCS ${ETHERNET_SOURCE})
 endif()
 
-if(WiFi OR Ethernet)
+if(WiFi OR WIFI_ENABLE EQUAL 1 OR Ethernet OR ETHERNET_ENABLE EQUAL 1)
 list (APPEND SRCS ${NETWORKING_SOURCE})
-if(SDcard AND FtpDaemon)
+if((SDcard OR SDCARD_ENABLE EQUAL 1) AND (FtpDaemon OR FTP_ENABLE EQUAL 1))
 list (APPEND SRCS ${NETWORKING_FTP_SOURCE})
 endif()
 endif()
 
-if(Keypad)
+if(Keypad OR KEYPAD_ENABLE GREATER_EQUAL 1)
 list (APPEND SRCS ${KEYPAD_SOURCE})
 endif()
 
-if(Trinamic OR TMC2130 OR TMC5160)
+if(Trinamic OR TMC2130 OR TMC5160 OR TRINAMIC_SPI_ENABLE GREATER_EQUAL 1)
 list (APPEND SRCS ${TRINAMIC_SPI_SOURCE})
 endif()
 
-if(TMC2209)
+if(TMC2209 OR TRINAMIC_UART_ENABLE GREATER_EQUAL 1)
 list (APPEND SRCS ${TRINAMIC_UART_SOURCE})
 endif()
 
-if(WebUI)
+if(WebUI OR WEBUI_ENABLE GREATER_EQUAL 1)
 list (APPEND SRCS ${WEBUI_SOURCE})
 list (APPEND SRCS ${SDCARD_SOURCE})
-elseif(SDcard)
+elseif(SDcard OR SDCARD_ENABLE EQUAL 1)
 list (APPEND SRCS ${SDCARD_SOURCE})
 endif()
-
-if(Bluetooth)
+if(Bluetooth OR BLUETOOTH_ENABLE EQUAL 1)
 list (APPEND SRCS ${BLUETOOTH_SOURCE})
 endif()
 
-if(HUANYANG)
-list (APPEND SRCS ${HUANYANG_SOURCE})
+if(HUANYANG OR VFD_ENABLE EQUAL -1 OR VFD_ENABLE GREATER_EQUAL 1 OR MODBUS_ENABLE GREATER_EQUAL 1)
+list (APPEND SRCS ${MODBUS_SOURCE})
 endif()
 
-if(EEPROM OR FRAM OR BOARD_CNC_BOOSTERPACK)
+if(HUANYANG OR VFD_ENABLE EQUAL -1 OR VFD_ENABLE GREATER_EQUAL 1)
+list (APPEND SRCS ${SPINDLE_SOURCE})
+endif()
+
+if(EEPROM OR FRAM OR BOARD_CNC_BOOSTERPACK OR DEFINED(BOARD_CNC_BOOSTERPACK) OR EEPROM_ENABLE EQUAL 1)
 list (APPEND SRCS ${EEPROM_SOURCE})
 endif()
-
-if(LBCLUSTER OR LASERCOOLANT)
+list (APPEND SRCS ${EEPROM_SOURCE})
+if(LBCLUSTER OR LASERCOOLANT OR LB_CLUSTERS_ENABLE EQUAL 1)
 list (APPEND SRCS ${LASER_SOURCE})
 endif()
 
@@ -256,7 +269,9 @@ target_compile_definitions("${COMPONENT_LIB}" PUBLIC GRBL_ESP32)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC OVERRIDE_MY_MACHINE)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC LITTLEFS_ENABLE=1)
 
-if(BOARD_BDRING_V3P5)
+if(BOARD_BLACKBOX_X32)
+target_compile_definitions("${COMPONENT_LIB}" PUBLIC BOARD_BLACKBOX_X32)
+elseif(BOARD_BDRING_V3P5)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC BOARD_BDRING_V3P5)
 elseif(BOARD_BDRING_V4)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC BOARD_BDRING_V4)
@@ -312,9 +327,9 @@ endif()
 if(TMC2209)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC TRINAMIC_ENABLE=2209)
 if(TMC2209_HWADDR)
-target_compile_definitions("${COMPONENT_LIB}" PUBLIC TRINAMIC_UART_HWADDR=1)
+target_compile_definitions("${COMPONENT_LIB}" PUBLIC TRINAMIC_UART_ENABLE=2)
 else()
-target_compile_definitions("${COMPONENT_LIB}" PUBLIC TRINAMIC_UART_HWADDR=0)
+target_compile_definitions("${COMPONENT_LIB}" PUBLIC TRINAMIC_UART_ENABLE=1)
 endif()
 endif()
 
@@ -341,6 +356,12 @@ endif()
 if(SDcard AND WebDAV)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC WEBDAV_ENABLE=1)
 endif()
+if(mDNS)
+target_compile_definitions("${COMPONENT_LIB}" PUBLIC MDNS_ENABLE=1)
+endif()
+if(SSDP)
+target_compile_definitions("${COMPONENT_LIB}" PUBLIC SSDP_ENABLE=1)
+endif()
 endif()
 
 if(SoftAP)
@@ -363,7 +384,6 @@ target_compile_definitions("${COMPONENT_LIB}" PUBLIC LWIP_HTTPD_SUPPORT_POST=1)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC LWIP_HTTPD_DYNAMIC_FILE_READ=1)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC SDCARD_ENABLE=1)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC WEBUI_AUTO_REPORT_INTERVAL=0)
-target_add_binary_data("${COMPONENT_LIB}" "embedded/index.html.gz" BINARY)
 if(WebAuth)
 target_compile_definitions("${COMPONENT_LIB}" PUBLIC WEBUI_AUTH_ENABLE=1)
 endif()
@@ -414,7 +434,11 @@ endif()
 
 target_add_binary_data("${COMPONENT_LIB}" "embedded/favicon.ico" BINARY)
 target_add_binary_data("${COMPONENT_LIB}" "embedded/ap_login.html" BINARY)
+if(WebUI OR WEBUI_ENABLE GREATER_EQUAL 1)
+target_add_binary_data("${COMPONENT_LIB}" "embedded/index.html.gz" BINARY)
+endif()
 
+unset(BOARD_BLACKBOX_X32 CACHE)
 unset(BOARD_BDRING_V3P5 CACHE)
 unset(BOARD_BDRING_V4 CACHE)
 unset(BOARD_BDRING_I2S6A CACHE)
@@ -440,6 +464,8 @@ unset(WiFi CACHE)
 unset(Ethernet CACHE)
 unset(FtpDaemon CACHE)
 unset(WebDAV CACHE)
+unset(mDNS CACHE)
+unset(SSDP CACHE)
 unset(SoftAP CACHE)
 unset(Bluetooth CACHE)
 unset(Keypad CACHE)

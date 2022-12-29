@@ -25,7 +25,7 @@
 
 #include "driver.h"
 
-#if WIFI_ENABLE
+#if WIFI_ENABLE || 1
 
 #include <string.h>
 
@@ -36,6 +36,7 @@
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <esp_event.h>
+#include "mdns.h"
 
 #include "nvs_flash.h"
 
@@ -69,7 +70,7 @@ static nvs_address_t nvs_address;
 static esp_netif_t *sta_netif = NULL, *ap_netif = NULL;
 static on_report_options_ptr on_report_options;
 static on_stream_changed_ptr on_stream_changed;
-static char netservices[NETWORK_SERVICES_LEN] = ""; // must be large enough to hold all service names
+static char netservices[NETWORK_SERVICES_LEN] = "";
 
 ap_list_t *wifi_get_aplist (void)
 {
@@ -123,6 +124,18 @@ static void reportIP (bool newopt)
         hal.stream.write(",WIFI,FTP");
 #else
         hal.stream.write(",WIFI");
+#endif
+#if WEBDAV_ENABLE
+        if(services.webdav)
+            hal.stream.write(",WebDAV");
+#endif
+#if MDNS_ENABLE
+        if(services.mdns)
+            hal.stream.write(",mDNS");
+#endif
+#if SSDP_ENABLE
+        if(services.ssdp)
+            hal.stream.write(",SSDP");
 #endif
     } else {
         hal.stream.write("[WIFI MAC:");
@@ -186,26 +199,63 @@ static void start_services (void)
 {
 #if TELNET_ENABLE
     if(network.services.telnet && !services.telnet)
-        services.telnet = telnetd_init(network.telnet_port == 0 ? NETWORK_TELNET_PORT : network.telnet_port);
+        services.telnet = telnetd_init(network.telnet_port);
 #endif
+
 #if WEBSOCKET_ENABLE
     if(network.services.websocket && !services.websocket)
-        services.websocket = websocketd_init(network.websocket_port == 0 ? NETWORK_WEBSOCKET_PORT : network.websocket_port);
+        services.websocket = websocketd_init(network.websocket_port);
 #endif
+
 #if FTP_ENABLE
     if(network.services.ftp && !services.ftp)
-        services.ftp = ftpd_init(network.ftp_port == 0 ? NETWORK_FTP_PORT : network.ftp_port);
+        services.ftp = ftpd_init(network.ftp_port);
 #endif
+
 #if HTTP_ENABLE
     if(network.services.http && !services.http) {
-        services.http = httpd_init(80);
+        services.http = httpd_init(network.http_port);
 //        services.http = httpdaemon_start(&network);
-#if WEBDAV_ENABLE
+  #if WEBDAV_ENABLE
         if(network.services.webdav && !services.webdav)
             services.webdav = webdav_init();
-#endif
+  #endif
+  #if SSDP_ENABLE
+        if(network.services.ssdp && !services.ssdp)
+            services.ssdp = ssdp_init(network.http_port);
+  #endif
     }
 #endif
+
+#if MDNS_ENABLE
+    if(*network.hostname && network.services.mdns && !services.mdns) {
+        if((services.mdns = mdns_init() == ESP_OK)) {
+
+            mdns_hostname_set(network.hostname);
+            mdns_instance_name_set(network.hostname);
+
+            mdns_txt_item_t device_info[3] = {
+                { .key = "version", .value = GRBL_VERSION},
+                { .key = "build", .value = NULL},
+                { .key = "model", .value = "grblHAL"}
+            };
+            device_info[1].value = uitoa(GRBL_BUILD);
+            mdns_service_add(NULL, "_device-info", "_tcp", 1, device_info, 3); // ESP-IDF does not allow port 0?
+
+            if(services.http)
+                mdns_service_add(NULL, "_http", "_tcp", network.http_port, &(mdns_txt_item_t){ .key = "path", .value = "/" }, 1);
+            if(services.webdav)
+                mdns_service_add(NULL, "_webdav", "_tcp", network.http_port, &(mdns_txt_item_t){ .key = "path", .value = "/" }, 1);
+            if(services.ftp)
+                mdns_service_add(NULL, "_ftp", "_tcp", network.ftp_port, &(mdns_txt_item_t){ .key = "path", .value = "/" }, 1);
+            if(services.websocket)
+                mdns_service_add(NULL, "_websocket", "_tcp", network.websocket_port, NULL, 0);
+            if(services.telnet)
+                mdns_service_add(NULL, "_telnet", "_tcp", network.telnet_port, NULL, 0);
+        }
+    }
+#endif
+
 #if TELNET_ENABLE || WEBSOCKET_ENABLE || FTP_ENABLE
     sys_timeout(STREAM_POLL_INTERVAL, lwIPHostTimerHandler, NULL);
 #endif
@@ -230,10 +280,25 @@ static void stop_services (void)
     if(running.websocket)
         websocketd_stop();
 #endif
+#if MDNS_ENABLE
+    if(running.mdns)
+        mdns_free();
+#endif
     if(running.dns)
         dns_server_stop();
 
     xEventGroupClearBits(wifi_event_group, CONNECTED_BIT|SCANNING_BIT|APSTA_BIT);
+}
+
+char *wifi_get_authmode_name (wifi_auth_mode_t authmode)
+{
+    return authmode == WIFI_AUTH_OPEN ? "open" :
+           authmode == WIFI_AUTH_WEP ? "wep" :
+           authmode == WIFI_AUTH_WPA_PSK ? "wpa-psk" :
+           authmode == WIFI_AUTH_WPA2_PSK ? "wpa-psk" :
+           authmode == WIFI_AUTH_WPA_WPA2_PSK ? "wpa-wpa2-psk" :
+           authmode == WIFI_AUTH_WPA2_ENTERPRISE ? "wpa-eap" :
+           "unknown";
 }
 
 void wifi_ap_scan (void)
@@ -452,6 +517,15 @@ static bool init_adapter (esp_netif_t *netif, network_settings_t *settings)
 {
     memcpy(&network, settings, sizeof(network_settings_t));
 
+    if(network.telnet_port == 0)
+        network.telnet_port = NETWORK_TELNET_PORT;
+    if(network.websocket_port == 0)
+        network.websocket_port = NETWORK_WEBSOCKET_PORT;
+    if(network.http_port == 0)
+        network.http_port = NETWORK_HTTP_PORT;
+    if(network.ftp_port == 0)
+        network.ftp_port = NETWORK_FTP_PORT;
+
     esp_netif_ip_info_t ipInfo;
 
     if(network.ip_mode == IpMode_Static) {
@@ -656,36 +730,36 @@ static const setting_group_detail_t ethernet_groups [] = {
 };
 
 static const setting_detail_t ethernet_settings[] = {
-    { Setting_NetworkServices, Group_Networking, "Network Services", NULL, Format_Bitfield, netservices, NULL, NULL, Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, true },
-    { Setting_WiFi_STA_SSID, Group_Networking_Wifi, "WiFi Station (STA) SSID", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.ssid, NULL, NULL, false },
-    { Setting_WiFi_STA_Password, Group_Networking_Wifi, "WiFi Station (STA) Password", NULL, Format_Password, "x(32)", NULL, "32", Setting_NonCore, &wifi.sta.password, NULL, NULL, false },
-    { Setting_Hostname, Group_Networking, "Hostname", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.network.hostname, NULL, NULL, true },
+    { Setting_NetworkServices, Group_Networking, "Network Services", NULL, Format_Bitfield, netservices, NULL, NULL, Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
+    { Setting_WiFi_STA_SSID, Group_Networking_Wifi, "WiFi Station (STA) SSID", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.ssid, NULL, NULL },
+    { Setting_WiFi_STA_Password, Group_Networking_Wifi, "WiFi Station (STA) Password", NULL, Format_Password, "x(32)", "8", "32", Setting_NonCore, &wifi.sta.password, NULL, NULL, { .allow_null = On } },
+    { Setting_Hostname, Group_Networking, "Hostname", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.network.hostname, NULL, NULL, { .reboot_required = On } },
 /*    { Setting_IpMode, Group_Networking, "IP Mode", NULL, Format_RadioButtons, "Static,DHCP,AutoIP", NULL, NULL, Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, false }, */
-    { Setting_IpAddress, Group_Networking, "IP Address", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, true },
-    { Setting_Gateway, Group_Networking, "Gateway", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, true },
-    { Setting_NetMask, Group_Networking, "Netmask", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, true },
+    { Setting_IpAddress, Group_Networking, "IP Address", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_Gateway, Group_Networking, "Gateway", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_NetMask, Group_Networking, "Netmask", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
 #if WIFI_SOFTAP
-    { Setting_WifiMode, Group_Networking_Wifi, "WiFi Mode", NULL, Format_RadioButtons, "Off,Station,Access Point,Access Point/Station", NULL, NULL, Setting_NonCore, &wifi.mode, NULL, NULL, false },
-    { Setting_WiFi_AP_SSID, Group_Networking_Wifi, "WiFi Access Point (AP) SSID", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.ap.ssid, NULL, NULL, false },
-    { Setting_WiFi_AP_Password, Group_Networking_Wifi, "WiFi Access Point (AP) Password", NULL, Format_Password, "x(32)", NULL, "32", Setting_NonCore, &wifi.ap.password, NULL, NULL, false },
-    { Setting_Hostname2, Group_Networking, "Hostname (AP)", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.ap.network.hostname, NULL, NULL, true },
-    { Setting_IpAddress2, Group_Networking, "IP Address (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, true },
-    { Setting_Gateway2, Group_Networking, "Gateway (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, true },
-    { Setting_NetMask2, Group_Networking, "Netmask (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, true },
+    { Setting_WifiMode, Group_Networking_Wifi, "WiFi Mode", NULL, Format_RadioButtons, "Off,Station,Access Point,Access Point/Station", NULL, NULL, Setting_NonCore, &wifi.mode, NULL, NULL },
+    { Setting_WiFi_AP_SSID, Group_Networking_Wifi, "WiFi Access Point (AP) SSID", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.ap.ssid, NULL, NULL },
+    { Setting_WiFi_AP_Password, Group_Networking_Wifi, "WiFi Access Point (AP) Password", NULL, Format_Password, "x(32)", "8", "32", Setting_NonCore, &wifi.ap.password, NULL, NULL, { .allow_null = On } },
+    { Setting_Hostname2, Group_Networking, "Hostname (AP)", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.ap.network.hostname, NULL, NULL, { .reboot_required = On } },
+    { Setting_IpAddress2, Group_Networking, "IP Address (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_Gateway2, Group_Networking, "Gateway (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_NetMask2, Group_Networking, "Netmask (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
 #else
-    { Setting_WifiMode, Group_Networking_Wifi, "WiFi Mode", NULL, Format_RadioButtons, "Off,Station", NULL, NULL, Setting_NonCore, &wifi.mode, NULL, NULL, false },
+    { Setting_WifiMode, Group_Networking_Wifi, "WiFi Mode", NULL, Format_RadioButtons, "Off,Station", NULL, NULL, Setting_NonCore, &wifi.mode, NULL, NULL },
 #endif
 #if TELNET_ENABLE
-    { Setting_TelnetPort, Group_Networking, "Telnet port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, true },
+    { Setting_TelnetPort, Group_Networking, "Telnet port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
 #endif
 #if HTTP_ENABLE
-    { Setting_HttpPort, Group_Networking, "HTTP port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, true },
+    { Setting_HttpPort, Group_Networking, "HTTP port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
 #endif
 #if FTP_ENABLE
-    { Setting_FtpPort, Group_Networking, "FTP port", NULL, Format_Int16, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, true },
+    { Setting_FtpPort, Group_Networking, "FTP port", NULL, Format_Int16, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
 #endif
 #if WEBSOCKET_ENABLE
-    { Setting_WebSocketPort, Group_Networking, "Websocket port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, true }
+    { Setting_WebSocketPort, Group_Networking, "Websocket port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } }
 #endif
 };
 

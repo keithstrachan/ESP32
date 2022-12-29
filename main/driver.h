@@ -35,6 +35,11 @@
 #if WEBUI_ENABLE
 #error "WebUI is not available in this setup!"
 #endif
+
+#ifndef PROBE_ENABLE
+#define PROBE_ENABLE   	1 // Probe input.
+#endif
+
 //
 #else
 //
@@ -119,12 +124,10 @@
 
 static const DRAM_ATTR float FZERO = 0.0f;
 
-#ifdef NOPROBE
-#define PROBE_ENABLE     0 // No probe input.
-#else
-#define PROBE_ENABLE     1 // Probe input.
+#ifndef PROBE_ENABLE
+#define PROBE_ENABLE   	0 // No probe input.
 #endif
-#define PROBE_ISR        0 // Catch probe state change by interrupt TODO: needs verification!
+#define PROBE_ISR   	0 // Catch probe state change by interrupt TODO: needs verification!
 
 // DO NOT change settings here!
 
@@ -132,7 +135,7 @@ static const DRAM_ATTR float FZERO = 0.0f;
 #define IOEXPAND_ENABLE 0 // I2C IO expander for some output signals.
 #endif
 
-#define IOEXPAND 0xFF   // Dummy pin number for I2C IO expander
+#define IOEXPAND 		0xFF // Dummy pin number for I2C IO expander
 
 // end configuration
 
@@ -191,6 +194,8 @@ typedef struct {
   #include "mks_dlc32_2_0_map.h"
 #elif defined(BOARD_MKS_TINYBEE_V1)
   #include "mks_tinybee_1_0_map.h"
+#elif defined(BOARD_BLACKBOX_X32)
+  #include "BlackBoxX32_map.h"
 #elif defined(BOARD_MY_MACHINE)
   #include "my_machine_map.h"
 #else // default board - NOTE: NOT FINAL VERSION!
@@ -206,9 +211,10 @@ typedef struct {
 #error "Pins 34 - 39 are input only!"
 #endif
 
-#if IOEXPAND_ENABLE || KEYPAD_ENABLE == 1 || EEPROM_ENABLE || (TRINAMIC_ENABLE && TRINAMIC_I2C)
+#if IOEXPAND_ENABLE || EEPROM_ENABLE || KEYPAD_ENABLE == 1 || I2C_STROBE_ENABLE || (TRINAMIC_ENABLE && TRINAMIC_I2C)
+#undef I2C_ENABLE
 #define I2C_ENABLE 1
-#else
+#elif !defined(I2C_ENABLE)
 #define I2C_ENABLE 0
 #endif
 
