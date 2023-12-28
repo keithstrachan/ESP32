@@ -5,7 +5,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2018-2021 Terje Io
+  Copyright (c) 2018-2023 Terje Io
 
   Some parts of the code is based on example code by Espressif, in the public domain
 
@@ -76,6 +76,7 @@ typedef struct {
     uint8_t data[1];
 } tx_chunk_t;
 
+static const io_stream_t *claim_stream (uint32_t baud_rate);
 static enqueue_realtime_command_ptr BTSetRtHandler (enqueue_realtime_command_ptr handler);
 
 static uint32_t connection = 0;
@@ -90,8 +91,20 @@ static char client_mac[18];
 
 static bt_tx_buffer_t txbuffer;
 static stream_rx_buffer_t rxbuffer = {0};
-static stream_rx_buffer_t rxbackup;
 static nvs_address_t nvs_address;
+static const io_stream_t *bt_stream = NULL;
+static io_stream_properties_t bt_streams[] = {
+    {
+      .type = StreamType_Bluetooth,
+      .instance = 20,
+      .flags.claimable = On,
+      .flags.claimed = Off,
+      .flags.connected = Off,
+      .flags.can_set_baud = On,
+      .flags.modbus_ready = Off,
+      .claim = claim_stream
+    }
+};
 static on_report_options_ptr on_report_options;
 static enqueue_realtime_command_ptr enqueue_realtime_command = protocol_enqueue_realtime_command;
 
@@ -117,12 +130,6 @@ uint16_t BTStreamRXFree (void)
     uint16_t head = rxbuffer.head, tail = rxbuffer.tail;
 
     return (RX_BUFFER_SIZE - 1) - BUFCOUNT(head, tail, RX_BUFFER_SIZE);
-}
-
-// "dummy" version of serialGetC
-static int16_t BTStreamGetNull (void)
-{
-    return -1;
 }
 
 int16_t BTStreamGetC (void)
@@ -161,7 +168,7 @@ static inline bool enqueue_tx_chunk (uint16_t length, uint8_t *data)
     return chunk != NULL;
 }
 
-// Since grbl always sends cr/lf terminated strings we can send complete strings to improve throughput
+// Since grblHAL always sends cr/lf terminated strings we can send complete strings to improve throughput
 bool BTStreamPutC (const char c)
 {
     if(txbuffer.head < BT_TX_BUFFER_SIZE)
@@ -242,20 +249,6 @@ static void report_bt_MAC (bool newopt)
     }
 }
 
-bool BTStreamSuspendInput (bool suspend)
-{
-    BT_MUTEX_LOCK();
-
-    if(suspend)
-        hal.stream.read = BTStreamGetNull;
-    else if(rxbuffer.backup)
-        memcpy(&rxbuffer, &rxbackup, sizeof(stream_rx_buffer_t));
-
-    BT_MUTEX_UNLOCK();
-
-    return rxbuffer.tail != rxbuffer.head;
-}
-
 static void flush_tx_queue (void)
 {
     if(uxQueueMessagesWaiting(tx_queue)) {
@@ -273,11 +266,16 @@ static void flush_tx_queue (void)
     }
 }
 
-static void esp_spp_cb (esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
+static bool is_connected (void)
 {
-    static const io_stream_t bluetooth_stream = {
+    return bt_streams[0].flags.connected;
+}
+
+static const io_stream_t *claim_stream (uint32_t baud_rate)
+{
+    static const io_stream_t stream = {
         .type = StreamType_Bluetooth,
-        .state.connected = true,
+        .is_connected = is_connected,
         .read = BTStreamGetC,
         .write = BTStreamWriteS,
         .write_char = BTStreamPutC,
@@ -287,6 +285,19 @@ static void esp_spp_cb (esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
         .set_enqueue_rt_handler = BTSetRtHandler
     };
 
+    if(bt_streams[0].flags.claimed)
+        return NULL;
+
+    if(baud_rate != 0)
+        bt_streams[0].flags.claimed = On;
+
+    bt_stream = &stream;
+
+    return &stream;
+}
+
+static void esp_spp_cb (esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
+{
     switch (event) {
 
         case ESP_SPP_INIT_EVT:
@@ -301,7 +312,7 @@ static void esp_spp_cb (esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
                 txbuffer.head = 0;
                 uint8_t *mac = param->srv_open.rem_bda;
                 sprintf(client_mac, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-                stream_connect(&bluetooth_stream);
+                bt_streams[0].flags.connected = stream_connect(claim_stream(0));
 
                 if(eTaskGetState(polltask) == eSuspended)
                     vTaskResume(polltask);
@@ -322,7 +333,10 @@ static void esp_spp_cb (esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
                 connection = 0;
                 client_mac[0] = '\0';
                 flush_tx_queue();
-                stream_disconnect(&bluetooth_stream);
+                bt_streams[0].flags.connected = Off;
+                if(bt_stream)
+                    stream_disconnect(bt_stream);
+                bt_stream = NULL;
             }
             break;
 
@@ -335,15 +349,7 @@ static void esp_spp_cb (esp_spp_cb_event_t event, esp_spp_cb_param_t *param)
                 c = (char)*data++;
                 // discard input if MPG has taken over...
                 if(hal.stream.type != StreamType_MPG) {
-
-                    if(c == CMD_TOOL_ACK && !rxbuffer.backup) {
-
-                        memcpy(&rxbackup, &rxbuffer, sizeof(stream_rx_buffer_t));
-                        rxbuffer.backup = true;
-                        rxbuffer.tail = rxbuffer.head;
-                        hal.stream.read = BTStreamGetC; // restore normal input
-
-                    } else if(!enqueue_realtime_command(c)) {
+                    if(!enqueue_realtime_command(c)) {
 
                         uint32_t bptr = (rxbuffer.head + 1) & (RX_BUFFER_SIZE - 1);  // Get next head pointer
 
@@ -469,8 +475,13 @@ static void pollTX (void * arg)
     }
 }
 
-bool bluetooth_start (void)
+bool bluetooth_start_local (void)
 {
+    static io_stream_details_t streams = {
+        .n_streams = sizeof(bt_streams) / sizeof(io_stream_properties_t),
+        .streams = bt_streams,
+    };
+
     client_mac[0] = '\0';
 
     if(bluetooth.device_name[0] == '\0' || !(event_group || (event_group = xEventGroupCreate())))
@@ -560,13 +571,15 @@ bool bluetooth_start (void)
         if (esp_bt_gap_set_cod(cod, ESP_BT_INIT_COD) != ESP_OK)
             return false;
 
+        stream_register_streams(&streams);
+
         is_up = true;
     }
 
     return is_up;
 }
 
-bool bluetooth_disable (void)
+bool bluetooth_disable_local (void)
 {
     if(esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED) {
 
@@ -674,7 +687,7 @@ static setting_details_t setting_details = {
     .restore = bluetooth_settings_restore
 };
 
-bool bluetooth_init (void)
+bool bluetooth_init_local (void)
 {
     if((nvs_address = nvs_alloc(sizeof(bluetooth_settings_t)))) {
 

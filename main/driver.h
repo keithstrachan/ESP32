@@ -5,7 +5,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2018-2022 Terje Io
+  Copyright (c) 2018-2023 Terje Io
   Copyright (c) 2011-2015 Sungeun K. Jeon
   Copyright (c) 2009-2011 Simen Svale Skogsrud
 
@@ -35,74 +35,51 @@
 #if WEBUI_ENABLE
 #error "WebUI is not available in this setup!"
 #endif
-
-#ifndef PROBE_ENABLE
-#define PROBE_ENABLE   	1 // Probe input.
-#endif
-
 //
 #else
 //
 // Process options from CMakeLists.txt
 //
-#ifdef MPG_MODE_ENABLE
-#undef MPG_MODE_ENABLE
-#define MPG_MODE_ENABLE 1
-#endif
-
-#ifdef KEYPAD_ENABLE
-#undef KEYPAD_ENABLE
-#define KEYPAD_ENABLE 1
-#endif
 
 #if WIFI_ENABLE || ETHERNET_ENABLE
-#if WEBUI_ENABLE
-#undef HTTP_ENABLE
-#define HTTP_ENABLE             1
-#else
-#define HTTP_ENABLE             0
-#endif
-#define TELNET_ENABLE           1
-#define WEBSOCKET_ENABLE        1
-#define NETWORK_TELNET_PORT     23
-#define NETWORK_FTP_PORT        21
-#define NETWORK_HTTP_PORT       80
-#define NETWORK_WEBSOCKET_PORT  81
+
+//#define TELNET_ENABLE           1
+//#define WEBSOCKET_ENABLE        1
+//#define NETWORK_TELNET_PORT     23
+//#define NETWORK_FTP_PORT        21
+//#define NETWORK_HTTP_PORT       80
+//#define NETWORK_WEBSOCKET_PORT  81
+
+// Ethernet settings
+//#define NETWORK_HOSTNAME        "grblHAL"
+//#define NETWORK_IPMODE          1 // 0 = static, 1 = DHCP, 2 = AutoIP
+//#define NETWORK_IP              "192.168.5.1"
+//#define NETWORK_GATEWAY         "192.168.5.1"
+//#define NETWORK_MASK            "255.255.255.0"
 
 // WiFi Station (STA) settings
-#define NETWORK_HOSTNAME    "Grbl"
-#define NETWORK_IPMODE      1 // 0 = static, 1 = DHCP, 2 = AutoIP
-#define NETWORK_IP          "192.168.5.1"
-#define NETWORK_GATEWAY     "192.168.5.1"
-#define NETWORK_MASK        "255.255.255.0"
+//#define NETWORK_STA_HOSTNAME    "grblHAL"
+//#define NETWORK_STA_IPMODE      1 // 0 = static, 1 = DHCP, 2 = AutoIP
+//#define NETWORK_STA_IP          "192.168.5.1"
+//#define NETWORK_STA_GATEWAY     "192.168.5.1"
+//#define NETWORK_STA_MASK        "255.255.255.0"
 
 // WiFi Access Point (AP) settings
 #if WIFI_SOFTAP
-#define NETWORK_AP_HOSTNAME "GrblAP"
-#define NETWORK_AP_IP       "192.168.5.1"
-#define NETWORK_AP_GATEWAY  "192.168.5.1"
-#define NETWORK_AP_MASK     "255.255.255.0"
-#define WIFI_AP_SSID        "GRBL"
-#define WIFI_AP_PASSWORD    "GrblPassword" // Minimum 8 characters, or blank for open
+//#define NETWORK_AP_HOSTNAME     "grblHAL_AP"
+//#define NETWORK_AP_IP           "192.168.5.1"
+//#define NETWORK_AP_GATEWAY      "192.168.5.1"
+//#define NETWORK_AP_MASK         "255.255.255.0"
+//#define NETWORK_AP_SSID         "grblHAL_AP"
+//#define NETWORK_AP_PASSWORD     "grblHALpwd" // Minimum 8 characters, or blank for open
 #define WIFI_MODE WiFiMode_AP; // OPTION: WiFiMode_APSTA
 #else
 #define WIFI_MODE WiFiMode_STA; // Do not change!
 #endif
 
-#if NETWORK_IPMODE == 0 && WIFI_SOFTAP
-#error "Cannot use static IP for station when soft AP is enabled!"
-#endif
+#endif // WIFI_ENABLE || ETHERNET_ENABLE
 
-#endif
-
-#ifdef RS485_DIR_ENABLE
-#undef RS485_DIR_ENABLE
-#if HUANYANG_ENABLE
-#define RS485_DIR_ENABLE 1
-#else
-#define RS485_DIR_ENABLE 0
-#endif
-#else
+#ifndef RS485_DIR_ENABLE
 #define RS485_DIR_ENABLE 0
 #endif
 
@@ -115,6 +92,7 @@
 #include "driver/rmt.h"
 #include "driver/i2c.h"
 #include "hal/gpio_types.h"
+#include "esp_log.h"
 
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -122,12 +100,18 @@
 #include "grbl/hal.h"
 #include "grbl/driver_opts.h"
 
-static const DRAM_ATTR float FZERO = 0.0f;
-
-#ifndef PROBE_ENABLE
-#define PROBE_ENABLE   	0 // No probe input.
+#if WIFI_ENABLE && NETWORK_STA_IPMODE == 0 && WIFI_SOFTAP
+#error "Cannot use static IP for station when soft AP is enabled!"
 #endif
-#define PROBE_ISR   	0 // Catch probe state change by interrupt TODO: needs verification!
+
+#ifndef GRBLHAL_TASK_PRIORITY
+#define GRBLHAL_TASK_PRIORITY 5
+#endif
+#ifndef GRBLHAL_TASK_CORE
+#define GRBLHAL_TASK_CORE 1
+#endif
+
+#define PROBE_ISR 0 // Catch probe state change by interrupt TODO: needs verification!
 
 // DO NOT change settings here!
 
@@ -135,7 +119,7 @@ static const DRAM_ATTR float FZERO = 0.0f;
 #define IOEXPAND_ENABLE 0 // I2C IO expander for some output signals.
 #endif
 
-#define IOEXPAND 		0xFF // Dummy pin number for I2C IO expander
+#define IOEXPAND 0xFF   // Dummy pin number for I2C IO expander
 
 // end configuration
 
@@ -153,10 +137,6 @@ static const DRAM_ATTR float FZERO = 0.0f;
 #include "trinamic/common.h"
 #endif
 
-#if MODBUS_ENABLE
-#include "spindle/modbus.h"
-#endif
-
 // TODO: move to wifi.c!
 typedef struct
 {
@@ -167,6 +147,7 @@ typedef struct
 
 typedef struct {
     uint8_t action;
+    uint_fast16_t address;
     void *params;
 } i2c_task_t;
 
@@ -196,6 +177,14 @@ typedef struct {
   #include "mks_tinybee_1_0_map.h"
 #elif defined(BOARD_BLACKBOX_X32)
   #include "BlackBoxX32_map.h"
+#elif defined(BOARD_ROOTCNC_V2)
+  #include "root_cnc_v2_map.h"
+#elif defined(BOARD_ROOTCNC_V3)
+  #include "root_cnc_v3_map.h"
+#elif defined(BOARD_BLOX)
+  #include "blox_map.h"
+#elif defined(BOARD_CNC3040)
+  #include "cnc3040_map.h"
 #elif defined(BOARD_MY_MACHINE)
   #include "my_machine_map.h"
 #else // default board - NOTE: NOT FINAL VERSION!
@@ -211,36 +200,17 @@ typedef struct {
 #error "Pins 34 - 39 are input only!"
 #endif
 
+#if DRIVER_SPINDLE_PWM_ENABLE && !defined(SPINDLE_PWM_PIN)
+#warning "PWM spindle is not supported by board map!"
+#undef DRIVER_SPINDLE_PWM_ENABLE
+#define DRIVER_SPINDLE_PWM_ENABLE 0
+#endif
+
 #if IOEXPAND_ENABLE || EEPROM_ENABLE || KEYPAD_ENABLE == 1 || I2C_STROBE_ENABLE || (TRINAMIC_ENABLE && TRINAMIC_I2C)
 #undef I2C_ENABLE
 #define I2C_ENABLE 1
 #elif !defined(I2C_ENABLE)
 #define I2C_ENABLE 0
-#endif
-
-#ifdef USE_I2S_OUT
-#undef USE_I2S_OUT
-#define USE_I2S_OUT 1
-#define DIGITAL_IN(pin) i2s_out_state(pin)
-#define DIGITAL_OUT(pin, state) i2s_out_write(pin, state)
-#else
-#define USE_I2S_OUT 0
-#define DIGITAL_IN(pin) gpio_get_level(pin)
-#define DIGITAL_OUT(pin, state) gpio_set_level(pin, state)
-#endif
-
-#ifndef I2S_SPINDLE
-#define I2S_SPINDLE USE_I2S_OUT
-#else
-#undef I2S_SPINDLE
-#define I2S_SPINDLE 1
-#endif
-
-#ifndef I2S_COOLANT
-#define I2S_COOLANT USE_I2S_OUT
-#else
-#undef I2S_COOLANT
-#define I2S_COOLANT 1
 #endif
 
 #ifdef I2C_PORT
@@ -250,17 +220,79 @@ extern SemaphoreHandle_t i2cBusy;
 #error "I2C port not available!"
 #endif
 
-#if MPG_MODE_ENABLE || MODBUS_ENABLE || TRINAMIC_UART_ENABLE
-#define SERIAL2_ENABLE 1
+#if USB_SERIAL_CDC
+#define SP0 1
+#else
+#define SP0 0
 #endif
 
-#if MPG_MODE_ENABLE
+#ifdef UART2_RX_PIN
+#define SP1 1
+#else
+#define SP1 0
+#endif
+
+#if MODBUS_ENABLE & MODBUS_RTU_ENABLED
+#define MODBUS_TEST 1
+#else
+#define MODBUS_TEST 0
+#endif
+
+#if TRINAMIC_UART_ENABLE
+#define TRINAMIC_TEST 1
+#else
+#define TRINAMIC_TEST 0
+#endif
+
+#if MPG_ENABLE
+#define MPG_TEST 1
+#else
+#define MPG_TEST 0
+#endif
+
+#if KEYPAD_ENABLE == 2 && MPG_ENABLE == 0
+#define KEYPAD_TEST 1
+#else
+#define KEYPAD_TEST 0
+#endif
+
+#if (MODBUS_TEST + KEYPAD_TEST + MPG_TEST + TRINAMIC_TEST) > (SP0 + SP1)
+#error "Too many options that requires a serial port are enabled!"
+#elif (MODBUS_TEST + KEYPAD_TEST + MPG_TEST + TRINAMIC_TEST)
+#define SERIAL2_ENABLE 1
+#else
+#define SERIAL2_ENABLE 0
+#endif
+
+#undef SP0
+#undef SP1
+#undef MODBUS_TEST
+#undef KEYPAD_TEST
+#undef MPG_TEST
+#undef TRINAMIC_TEST
+
+#if MPG_MODE == 1
   #ifndef MPG_ENABLE_PIN
   #error "MPG_ENABLE_PIN must be defined when MPG mode is enabled!"
   #endif
   #ifndef UART2_RX_PIN
   #error "UART2_RX_PIN must be defined when MPG mode is enabled!"
   #endif
+#endif
+
+#ifndef I2S_OUT_PIN_BASE
+#define I2S_OUT_PIN_BASE 64
+#endif
+
+#ifdef USE_I2S_OUT
+#undef USE_I2S_OUT
+#define USE_I2S_OUT 1
+#define DIGITAL_IN(pin) i2s_out_state(pin - I2S_OUT_PIN_BASE)
+#define DIGITAL_OUT(pin, state) i2s_out_write(pin - I2S_OUT_PIN_BASE, state)
+#else
+#define USE_I2S_OUT 0
+#define DIGITAL_IN(pin) gpio_get_level(pin)
+#define DIGITAL_OUT(pin, state) gpio_set_level(pin, state)
 #endif
 
 typedef enum
@@ -304,10 +336,8 @@ typedef struct {
 } pin_group_pins_t;
 
 gpio_int_type_t map_intr_type (pin_irq_mode_t mode);
-#ifdef HAS_IOPORTS
 void ioports_init(pin_group_pins_t *aux_inputs, pin_group_pins_t *aux_outputs);
 void ioports_event (input_signal_t *input);
-#endif
 
 #ifdef HAS_BOARD_INIT
 void board_init (void);

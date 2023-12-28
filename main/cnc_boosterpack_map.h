@@ -5,7 +5,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2020-2022 Terje Io
+  Copyright (c) 2020-2023 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -70,11 +70,20 @@
 #define Y_LIMIT_PIN             GPIO_NUM_16
 #define Z_LIMIT_PIN             GPIO_NUM_32
 
-#if VFD_SPINDLE != 1
-// Define spindle enable and spindle direction output pins.
-#define SPINDLE_ENABLE_PIN      IOEXPAND
+// Define driver spindle pins
+
+#if DRIVER_SPINDLE_PWM_ENABLE
+#define SPINDLE_PWM_PIN         GPIO_NUM_17
+#else
+#define AUXOUTPUT0_PIN          GPIO_NUM_17
+#endif
+
+#if DRIVER_SPINDLE_DIR_ENABLE
 #define SPINDLE_DIRECTION_PIN   IOEXPAND
-#define SPINDLEPWMPIN           GPIO_NUM_17
+#endif
+
+#if DRIVER_SPINDLE_ENABLE
+#define SPINDLE_ENABLE_PIN      IOEXPAND
 #endif
 
 // Define flood and mist coolant enable output pins.
@@ -94,9 +103,11 @@
 
 #if I2C_STROBE_ENABLE
 #define I2C_STROBE_PIN          GPIO_NUM_33
+#else
+#define AUXINPUT0_PIN           GPIO_NUM_33
 #endif
 
-#if MODBUS_ENABLE
+#if MODBUS_ENABLE & MODBUS_RTU_ENABLED
 #define UART2_RX_PIN            GPIO_NUM_33
 #define UART2_TX_PIN            GPIO_NUM_25
 #if RS485_DIR_ENABLE
@@ -104,7 +115,7 @@
 #endif
 #endif
 
-#if MPG_MODE_ENABLE
+#if MPG_MODE == 1
 #define UART2_RX_PIN            GPIO_NUM_33
 #define MPG_ENABLE_PIN          GPIO_NUM_25
 #endif

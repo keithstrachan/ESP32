@@ -1,12 +1,10 @@
 /*
 
-  i2s.h - driver code for Espressif ESP32 processor
-
-  "hack" defines for Michiyasu Odakis I2S stepper implementation for ESP32
+  uart_serial.h - driver code for ESP32
 
   Part of grblHAL
 
-  Copyright (c) 2020 Terje Io
+  Copyright (c) 2023 Terje Io
 
   Grbl is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -23,10 +21,9 @@
 
 */
 
-#define LOW 0
-#define HIGH 1
-#define __digitalWrite(pin, state) gpio_set_level(pin, (state))
-#define delay(ms) hal.delay_ms(ms, 0);
-#define nullptr 0
-#define CONFIG_ARDUINO_RUNNING_CORE 1
-#define F_STEPPER_TIMER hal.f_step_timer
+#ifndef _UART_SERIAL_H_
+#define _UART_SERIAL_H_
+
+void serialRegisterStreams (void);
+
+#endif

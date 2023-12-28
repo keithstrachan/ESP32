@@ -1,5 +1,5 @@
 /*
-  sourcerabbit_4axis.h - An embedded CNC Controller with rs274/ngc (g-code) support
+  cnc3040.h - An embedded CNC Controller with rs274/ngc (g-code) support
 
   Driver code for ESP32
 
@@ -25,23 +25,22 @@
 #error "Axis configuration is not supported!"
 #endif
 
-#ifdef BOARD_SOURCERABBIT_4AXIS_12
-#define BOARD_NAME "SourceRabbit 4-axis CNC v1.2"
-#else
-#define BOARD_NAME "SourceRabbit 4-axis CNC"
-#endif
-#define BOARD_URL "https://www.sourcerabbit.com/Shop/pr-i-86-t-4-axis-cnc-motherboard.htm"
+#define BOARD_NAME "CNC3040 4-axis CNC"
+#define BOARD_URL "https://github.com/shaise/GrblCNC/tree/master/Hardware/GrblCnc3040"
 
 // timer definitions
 #define STEP_TIMER_GROUP TIMER_GROUP_0
 #define STEP_TIMER_INDEX TIMER_0
 
-#if MODBUS_ENABLE & MODBUS_RTU_ENABLED
+#if MODBUS_ENABLE
 #error VFD Spindle not supported!
 #endif
 
-#if KEYPAD_ENABLE
-#error Keypad not supported!
+#if KEYPAD_ENABLE == 2
+#define UART2_TX_PIN      GPIO_NUM_17
+#define UART2_RX_PIN      GPIO_NUM_16
+#elif KEYPAD_ENABLE == 1
+#error I2C Keypad not supported!
 #endif
 
 #if SDCARD_ENABLE
@@ -49,28 +48,28 @@
 #endif
 
 // Define step pulse output pins.
-#define X_STEP_PIN          GPIO_NUM_0
+#define X_STEP_PIN          GPIO_NUM_32
 #define Y_STEP_PIN          GPIO_NUM_25
 #define Z_STEP_PIN          GPIO_NUM_27
 
 // Define step direction output pins. NOTE: All direction pins must be on the same port.
 #define X_DIRECTION_PIN     GPIO_NUM_33
 #define Y_DIRECTION_PIN     GPIO_NUM_26
-#define Z_DIRECTION_PIN     GPIO_NUM_14
+#define Z_DIRECTION_PIN     GPIO_NUM_18
 
 // Define stepper driver enable/disable output pin(s).
 #define STEPPERS_ENABLE_PIN GPIO_NUM_15
 
 // Define homing/hard limit switch input pins and limit interrupt vectors.
-#define X_LIMIT_PIN         GPIO_NUM_36
-#define Y_LIMIT_PIN         GPIO_NUM_39
+#define X_LIMIT_PIN         GPIO_NUM_36   // VP
+#define Y_LIMIT_PIN         GPIO_NUM_39   // VN
 #define Z_LIMIT_PIN         GPIO_NUM_34
 
 // Define ganged axis or A axis step pulse and step direction output pins.
 #if N_ABC_MOTORS > 0
 #define M3_AVAILABLE
-#define M3_STEP_PIN         GPIO_NUM_12
-#define M3_DIRECTION_PIN    GPIO_NUM_13
+#define M3_STEP_PIN         GPIO_NUM_5
+#define M3_DIRECTION_PIN    GPIO_NUM_4
 #endif
 
 // Define driver spindle pins
@@ -78,23 +77,13 @@
 #if DRIVER_SPINDLE_PWM_ENABLE
 #define SPINDLE_PWM_PIN         GPIO_NUM_21
 #else
-#define AUXOUTPUT2_PIN          GPIO_NUM_21
+#define AUXOUTPUT0_PIN          GPIO_NUM_21
 #endif
 
-#ifdef BOARD_SOURCERABBIT_4AXIS_12
-#if DRIVER_SPINDLE_DIR_ENABLE
-#define SPINDLE_DIRECTION_PIN   GPIO_NUM_2
-#else
-#define AUXOUTPUT3_PIN          GPIO_NUM_2
-#endif
-#endif
-
-#ifndef BOARD_SOURCERABBIT_4AXIS_12
 #if DRIVER_SPINDLE_ENABLE
 #define SPINDLE_ENABLE_PIN      GPIO_NUM_2
 #else
-#define AUXOUTPUT3_PIN          GPIO_NUM_2
-#endif
+#define AUXOUTPUT1_PIN          GPIO_NUM_2
 #endif
 
 // Define flood and mist coolant enable output pins.
@@ -107,15 +96,12 @@
 
 // Define probe switch input pin.
 #if PROBE_ENABLE
-#define PROBE_PIN           GPIO_NUM_32
+#define PROBE_PIN           GPIO_NUM_19
 #endif
 
-#ifdef BOARD_SOURCERABBIT_4AXIS_12
 #if SAFETY_DOOR_ENABLE
-#define SAFETY_DOOR_PIN     GPIO_NUM_5  // ATC Door
+#define SAFETY_DOOR_PIN     GPIO_NUM_35  // ATC Door
 #else
-#define AUXINPUT0_PIN       GPIO_NUM_5  // ATC Door
+#define AUXINPUT0_PIN       GPIO_NUM_35  // ATC Door
 #endif
-#define AUXOUTPUT0_PIN      GPIO_NUM_19 // ATC Lock
-#define AUXOUTPUT1_PIN      GPIO_NUM_18 // ATC Blow
-#endif
+

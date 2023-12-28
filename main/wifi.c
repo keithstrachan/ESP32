@@ -5,7 +5,7 @@
 
   Part of grblHAL
 
-  Copyright (c) 2018-2022 Terje Io
+  Copyright (c) 2018-2023 Terje Io
 
   Some parts of the code is based on example code by Espressif, in the public domain
 
@@ -25,7 +25,7 @@
 
 #include "driver.h"
 
-#if WIFI_ENABLE || 1
+#if WIFI_ENABLE
 
 #include <string.h>
 
@@ -71,6 +71,40 @@ static esp_netif_t *sta_netif = NULL, *ap_netif = NULL;
 static on_report_options_ptr on_report_options;
 static on_stream_changed_ptr on_stream_changed;
 static char netservices[NETWORK_SERVICES_LEN] = "";
+static char *country_codes[] = {
+    "01", "AT", "AU", "BE", "BG", "BR", "CA", "CH", "CN", "CY", "CZ", "DE", "DK",
+    "EE", "ES", "FI", "FR", "GB", "GR", "HK", "HR", "HU", "IE", "IN", "IS", "IT",
+    "JP", "KR", "LI", "LT", "LU", "LV", "MT", "MX", "NL", "NO", "NZ", "PL", "PT",
+    "RO", "SE", "SI", "SK", "TW", "US", ""
+};
+
+static bool validate_country_code (char *country_id)
+{
+    uint_fast8_t idx = 0;
+
+    if(*country_id) while(*country_codes[idx]) {
+        if(!strcmp(country_id, country_codes[idx]))
+            return true;
+        idx++;
+    }
+
+    return false;
+}
+
+#if MQTT_ENABLE
+
+static bool mqtt_connected = false;
+static on_mqtt_client_connected_ptr on_client_connected;
+
+static void mqtt_connection_changed (bool connected)
+{
+    mqtt_connected = connected;
+
+    if(on_client_connected)
+         on_client_connected(connected);
+}
+
+#endif
 
 ap_list_t *wifi_get_aplist (void)
 {
@@ -85,9 +119,12 @@ void wifi_release_aplist (void)
     xSemaphoreGive(aplist_mutex);
 }
 
-char *iptoa (void *ip) {
+char *iptoa (void *ip)
+{
     static char aip[INET6_ADDRSTRLEN];
+
     inet_ntop(AF_INET, ip, aip, INET6_ADDRSTRLEN);
+
     return aip;
 }
 
@@ -110,7 +147,7 @@ char *wifi_get_mac (void)
     uint8_t bmac[6];
 
     esp_wifi_get_mac(ESP_IF_WIFI_STA, bmac);
-    sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", bmac[0], bmac[1], bmac[2], bmac[3], bmac[4], bmac[5]);
+    sprintf(mac, MAC_FORMAT_STRING, bmac[0], bmac[1], bmac[2], bmac[3], bmac[4], bmac[5]);
 
     return mac;
 }
@@ -120,10 +157,10 @@ static void reportIP (bool newopt)
     on_report_options(newopt);
 
     if(newopt) {
-#if FTP_ENABLE
-        hal.stream.write(",WIFI,FTP");
-#else
         hal.stream.write(",WIFI");
+#if FTP_ENABLE
+        if(services.ftp)
+            hal.stream.write(",FTP");
 #endif
 #if WEBDAV_ENABLE
         if(services.webdav)
@@ -151,6 +188,15 @@ static void reportIP (bool newopt)
             hal.stream.write(active_stream == StreamType_Telnet ? "Telnet" : "Websocket");
             hal.stream.write("]" ASCII_EOL);
         }
+
+#if MQTT_ENABLE
+        char *client_id;
+        if(*(client_id = networking_get_info()->mqtt_client_id)) {
+            hal.stream.write("[MQTT CLIENTID:");
+            hal.stream.write(client_id);
+            hal.stream.write(mqtt_connected ? "]" ASCII_EOL : " (offline)]" ASCII_EOL);
+        }
+#endif
     }
 }
 
@@ -173,8 +219,14 @@ network_info_t *networking_get_info (void)
 //    info.mbps = 100;
     info.status.services = services;
 
+#if MQTT_ENABLE
+    networking_make_mqtt_clientid(info.mac, info.mqtt_client_id);
+#endif
+
     return &info;
 }
+
+#if TELNET_ENABLE || WEBSOCKET_ENABLE || FTP_ENABLE
 
 static void lwIPHostTimerHandler (void *arg)
 {
@@ -195,7 +247,9 @@ static void lwIPHostTimerHandler (void *arg)
 #endif
 }
 
-static void start_services (void)
+#endif
+
+static void start_services (bool start_ssdp)
 {
 #if TELNET_ENABLE
     if(network.services.telnet && !services.telnet)
@@ -215,16 +269,15 @@ static void start_services (void)
 #if HTTP_ENABLE
     if(network.services.http && !services.http) {
         services.http = httpd_init(network.http_port);
-//        services.http = httpdaemon_start(&network);
   #if WEBDAV_ENABLE
         if(network.services.webdav && !services.webdav)
             services.webdav = webdav_init();
   #endif
-  #if SSDP_ENABLE
-        if(network.services.ssdp && !services.ssdp)
-            services.ssdp = ssdp_init(network.http_port);
-  #endif
     }
+  #if SSDP_ENABLE
+    if(start_ssdp && services.http && !services.ssdp)
+        services.ssdp = ssdp_init(network.http_port);
+  #endif
 #endif
 
 #if MDNS_ENABLE
@@ -254,6 +307,11 @@ static void start_services (void)
                 mdns_service_add(NULL, "_telnet", "_tcp", network.telnet_port, NULL, 0);
         }
     }
+#endif
+
+#if MQTT_ENABLE
+    if(!mqtt_connected)
+        mqtt_connect(&network.mqtt, networking_get_info()->mqtt_client_id);
 #endif
 
 #if TELNET_ENABLE || WEBSOCKET_ENABLE || FTP_ENABLE
@@ -366,7 +424,7 @@ static void ip_event_handler (void *arg, esp_event_base_t event_base, int32_t ev
             ap_list.ap_selected = wifi_sta_config.sta.ssid;
             memcpy(&ap_list.ip_addr, &((ip_event_got_ip_t *)event_data)->ip_info.ip, sizeof(ip4_addr_t));
             strcpy(ap_list.ap_status, "Connected");
-            start_services();
+            start_services(network.services.ssdp);
             if(services.dns) {
                 services.dns = Off;
                 dns_server_stop();
@@ -391,10 +449,9 @@ static void wifi_event_handler (void *arg, esp_event_base_t event_base, int32_t 
 
         case WIFI_EVENT_AP_START:
             protocol_enqueue_rt_command(msg_ap_ready);
-            start_services();
             if(xEventGroupGetBits(wifi_event_group) & APSTA_BIT) {
-                dns_server_start(sta_netif);
-                services.dns = On;
+                start_services(false);
+                services.dns = dns_server_start(sta_netif);
 //                protocol_enqueue_rt_command(wifi_ap_scan);
             }
             break;
@@ -406,25 +463,34 @@ static void wifi_event_handler (void *arg, esp_event_base_t event_base, int32_t 
 */
         case WIFI_EVENT_AP_STACONNECTED:
             protocol_enqueue_rt_command(msg_ap_connected);
-            if((xEventGroupGetBits(wifi_event_group) & APSTA_BIT) && !(xEventGroupGetBits(wifi_event_group) & CONNECTED_BIT)) {
-                /* // screws up dns?
-                if(!(xEventGroupGetBits(wifi_event_group) & SCANNING_BIT)) {
-                  //  ap_list.ap_selected = NULL;
-                  //  wifi_ap_scan();
+            if(xEventGroupGetBits(wifi_event_group) & APSTA_BIT) {
+                if(!(xEventGroupGetBits(wifi_event_group) & CONNECTED_BIT)) {
+                    /* // screws up dns?
+                    if(!(xEventGroupGetBits(wifi_event_group) & SCANNING_BIT)) {
+                      //  ap_list.ap_selected = NULL;
+                      //  wifi_ap_scan();
+                    }
+                    */
+                    if(!services.dns)
+                        services.dns = dns_server_start(sta_netif);
                 }
-                */
-                if(!services.dns) {
-                    dns_server_start(sta_netif);
-                    services.dns = On;
-                }
-
-            }
+            } else
+                start_services(network.services.ssdp);
             break;
 
         case WIFI_EVENT_AP_STADISCONNECTED:
+#if TELNET_ENABLE
             telnetd_close_connections();
+#endif
+#if WEBSOCKET_ENABLE
             websocketd_close_connections();
-            wifi_ap_scan();
+#endif
+            if(xEventGroupGetBits(wifi_event_group) & APSTA_BIT)
+                wifi_ap_scan();
+#if SSDP_ENABLE
+            else if(!(xEventGroupGetBits(wifi_event_group) & CONNECTED_BIT))
+                ssdp_stop();
+#endif
             protocol_enqueue_rt_command(msg_ap_disconnected);
             break;
                 
@@ -435,16 +501,18 @@ static void wifi_event_handler (void *arg, esp_event_base_t event_base, int32_t 
 
         case WIFI_EVENT_STA_DISCONNECTED:
             //stop_services();
+#if TELNET_ENABLE
             telnetd_close_connections();
+#endif
+#if WEBSOCKET_ENABLE
             websocketd_close_connections();
+#endif
             protocol_enqueue_rt_command(msg_sta_disconnected);
             memset(&wifi_sta_config, 0, sizeof(wifi_config_t));
             esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_sta_config);
             if((xEventGroupGetBits(wifi_event_group) & APSTA_BIT) && !(xEventGroupGetBits(wifi_event_group) & CONNECTED_BIT)) {
-                if(!services.dns) {
-                    dns_server_start(sta_netif);
-                    services.dns = On;
-                }
+                if(!services.dns)
+                    services.dns = dns_server_start(sta_netif);
 //                ap_list.ap_selected = NULL;
 //                wifi_ap_scan();
             }
@@ -591,6 +659,7 @@ bool wifi_start (void)
 
     if(currentMode != settingToMode(wifi.mode) && (wifi.mode == WiFiMode_AP || wifi.mode == WiFiMode_APSTA)) {
 
+        char country[4];
         wifi_config_t wifi_config;
 
         if(ap_netif == NULL)
@@ -612,7 +681,7 @@ bool wifi_start (void)
         if(strlcpy((char *)wifi_config.ap.ssid, wifi.ap.ssid, sizeof(wifi_config.ap.ssid)) >= sizeof(wifi_config.ap.ssid))
             return false;
 
-        if (*wifi.ap.password == '\0')
+        if(*wifi.ap.password == '\0')
             wifi_config.ap.authmode = WIFI_AUTH_OPEN;
         else if(strlcpy((char *)wifi_config.ap.password, wifi.ap.password, sizeof(wifi_config.ap.password)) < sizeof(wifi_config.ap.password))
             wifi_config.ap.authmode = WIFI_AUTH_WPA_WPA2_PSK;
@@ -620,6 +689,10 @@ bool wifi_start (void)
             return false;
 
         wifi_config.ap.max_connection = 1;
+        wifi_config.ap.channel = wifi.ap.channel;
+
+        if(esp_wifi_get_country_code(country) == ESP_OK && strcmp(country, wifi.ap.country))
+            esp_wifi_set_country_code(wifi.ap.country, true);
 
         if(esp_wifi_set_mode(settingToMode(wifi.mode)) != ESP_OK)
             return false;
@@ -653,6 +726,9 @@ bool wifi_start (void)
             if(strlcpy((char *)wifi_sta_config.sta.password, wifi.sta.password, sizeof(wifi_sta_config.sta.password)) >= sizeof(wifi_sta_config.sta.password))
                 return false;
         }
+
+        if((wifi_sta_config.sta.bssid_set = !networking_ismemnull(wifi.ap.bssid, sizeof(bssid_t))))
+            memcpy(wifi_sta_config.sta.bssid, wifi.ap.bssid, sizeof(bssid_t));
 
         if(esp_wifi_set_mode(settingToMode(wifi.mode)) != ESP_OK)
             return false;
@@ -724,6 +800,62 @@ static char *wifi_get_ip (setting_id_t setting);
 static void wifi_settings_restore (void);
 static void wifi_settings_load (void);
 
+static status_code_t wifi_set_bssid (setting_id_t setting, char *value)
+{
+    if(*value) {
+
+        uint32_t bssid[6];
+        if(sscanf(value,"%2X:%2X:%2X:%2X:%2X:%2X", &bssid[5], &bssid[4], &bssid[3],
+                                                    &bssid[2], &bssid[1], &bssid[0]) == 6) {
+
+            char c = LCAPS(value[strlen(value) - 1]);
+            if(!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                return Status_InvalidStatement;
+
+            uint_fast8_t idx;
+            for(idx = 0; idx < 6; idx++)
+                wifi.ap.bssid[idx] = bssid[idx];
+        } else
+            return Status_InvalidStatement;
+    } else
+        memset(wifi.ap.bssid, 0, sizeof(bssid_t));
+
+    return Status_OK;
+}
+
+static char *wifi_get_bssid (setting_id_t setting)
+{
+    static char bssid[18];
+
+    if(networking_ismemnull(wifi.ap.bssid, sizeof(bssid_t)))
+        *bssid = '\0';
+    else
+        sprintf(bssid, MAC_FORMAT_STRING, wifi.ap.bssid[5], wifi.ap.bssid[4], wifi.ap.bssid[3],
+                                           wifi.ap.bssid[2], wifi.ap.bssid[1], wifi.ap.bssid[0]);
+    return bssid;
+}
+
+#if WIFI_SOFTAP
+
+static status_code_t wifi_set_country (setting_id_t setting, char *value)
+{
+    status_code_t status;
+
+    strcaps(value);
+
+    if((status = validate_country_code(value) ? Status_OK : Status_GcodeValueOutOfRange) == Status_OK)
+        strcpy(wifi.ap.country, value);
+
+    return status;
+}
+
+static char *wifi_get_country (setting_id_t setting)
+{
+    return wifi.ap.country;
+}
+
+#endif
+
 static const setting_group_detail_t ethernet_groups [] = {
     { Group_Root, Group_Networking, "Networking" },
     { Group_Networking, Group_Networking_Wifi, "WiFi" }
@@ -732,16 +864,19 @@ static const setting_group_detail_t ethernet_groups [] = {
 static const setting_detail_t ethernet_settings[] = {
     { Setting_NetworkServices, Group_Networking, "Network Services", NULL, Format_Bitfield, netservices, NULL, NULL, Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
     { Setting_WiFi_STA_SSID, Group_Networking_Wifi, "WiFi Station (STA) SSID", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.ssid, NULL, NULL },
+    { Setting_Wifi_AP_BSSID, Group_Networking_Wifi, "WiFi Access Point (AP) BSSID", NULL, Format_String, "x(17)", "17", "17", Setting_NonCoreFn, wifi_set_bssid, wifi_get_bssid, NULL, { .allow_null = On, .reboot_required = On } },
     { Setting_WiFi_STA_Password, Group_Networking_Wifi, "WiFi Station (STA) Password", NULL, Format_Password, "x(32)", "8", "32", Setting_NonCore, &wifi.sta.password, NULL, NULL, { .allow_null = On } },
-    { Setting_Hostname, Group_Networking, "Hostname", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.network.hostname, NULL, NULL, { .reboot_required = On } },
+    { Setting_Hostname3, Group_Networking, "Hostname", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.sta.network.hostname, NULL, NULL, { .reboot_required = On } },
 /*    { Setting_IpMode, Group_Networking, "IP Mode", NULL, Format_RadioButtons, "Static,DHCP,AutoIP", NULL, NULL, Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, false }, */
-    { Setting_IpAddress, Group_Networking, "IP Address", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
-    { Setting_Gateway, Group_Networking, "Gateway", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
-    { Setting_NetMask, Group_Networking, "Netmask", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_IpAddress3, Group_Networking, "IP Address", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_Gateway3, Group_Networking, "Gateway", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_NetMask3, Group_Networking, "Netmask", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
 #if WIFI_SOFTAP
     { Setting_WifiMode, Group_Networking_Wifi, "WiFi Mode", NULL, Format_RadioButtons, "Off,Station,Access Point,Access Point/Station", NULL, NULL, Setting_NonCore, &wifi.mode, NULL, NULL },
     { Setting_WiFi_AP_SSID, Group_Networking_Wifi, "WiFi Access Point (AP) SSID", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.ap.ssid, NULL, NULL },
     { Setting_WiFi_AP_Password, Group_Networking_Wifi, "WiFi Access Point (AP) Password", NULL, Format_Password, "x(32)", "8", "32", Setting_NonCore, &wifi.ap.password, NULL, NULL, { .allow_null = On } },
+    { Setting_Wifi_AP_Country, Group_Networking_Wifi, "WiFi Country Code", NULL, Format_String, "x(2)", "2", "2", Setting_NonCoreFn, wifi_set_country, wifi_get_country, NULL, { .allow_null = On, .reboot_required = On } },
+    { Setting_Wifi_AP_Channel, Group_Networking_Wifi, "WiFi Channel (AP)", NULL, Format_Int8, "#0", "1", "13", Setting_NonCore, &wifi.ap.channel, NULL, NULL, { .reboot_required = On } },
     { Setting_Hostname2, Group_Networking, "Hostname (AP)", NULL, Format_String, "x(64)", NULL, "64", Setting_NonCore, &wifi.ap.network.hostname, NULL, NULL, { .reboot_required = On } },
     { Setting_IpAddress2, Group_Networking, "IP Address (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
     { Setting_Gateway2, Group_Networking, "Gateway (AP)", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
@@ -750,34 +885,44 @@ static const setting_detail_t ethernet_settings[] = {
     { Setting_WifiMode, Group_Networking_Wifi, "WiFi Mode", NULL, Format_RadioButtons, "Off,Station", NULL, NULL, Setting_NonCore, &wifi.mode, NULL, NULL },
 #endif
 #if TELNET_ENABLE
-    { Setting_TelnetPort, Group_Networking, "Telnet port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
+    { Setting_TelnetPort3, Group_Networking, "Telnet port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
 #endif
 #if HTTP_ENABLE
-    { Setting_HttpPort, Group_Networking, "HTTP port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
+    { Setting_HttpPort3, Group_Networking, "HTTP port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
 #endif
 #if FTP_ENABLE
-    { Setting_FtpPort, Group_Networking, "FTP port", NULL, Format_Int16, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
+    { Setting_FtpPort3, Group_Networking, "FTP port", NULL, Format_Int16, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
 #endif
 #if WEBSOCKET_ENABLE
-    { Setting_WebSocketPort, Group_Networking, "Websocket port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } }
+    { Setting_WebSocketPort3, Group_Networking, "Websocket port", NULL, Format_Integer, "####0", "1", "65535", Setting_NonCoreFn, wifi_set_int, wifi_get_int, NULL, { .reboot_required = On } },
+#endif
+#if MQTT_ENABLE
+    { Setting_MQTTBrokerIpAddress, Group_Networking, "MQTT broker IP Address", NULL, Format_IPv4, NULL, NULL, NULL, Setting_NonCoreFn, wifi_set_ip, wifi_get_ip, NULL, { .reboot_required = On } },
+    { Setting_MQTTBrokerPort, Group_Networking, "MQTT broker port", NULL, Format_Int16, "####0", "1", "65535", Setting_NonCore, &wifi.sta.network.mqtt.port, NULL, NULL, { .reboot_required = On } },
+    { Setting_MQTTBrokerUserName, Group_Networking, "MQTT broker username", NULL, Format_String, "x(32)", NULL, "32", Setting_NonCore, &wifi.sta.network.mqtt.user, NULL, NULL, { .allow_null = On } },
+    { Setting_MQTTBrokerPassword, Group_Networking, "MQTT broker password", NULL, Format_Password, "x(32)", NULL, "32", Setting_NonCore, &wifi.sta.network.mqtt.password, NULL, NULL, { .allow_null = On } },
 #endif
 };
 
 #ifndef NO_SETTINGS_DESCRIPTIONS
 
 static const setting_descr_t ethernet_settings_descr[] = {
-    { Setting_NetworkServices, "Network services to enable. Consult driver documentation for availability." },
+    { Setting_NetworkServices, "Network services to enable." },
     { Setting_WiFi_STA_SSID, "WiFi Station (STA) SSID." },
+    { Setting_Wifi_AP_BSSID, "Optional WiFi Access Point BSSID (MAC) to connect to, colon delimited values." },
     { Setting_WiFi_STA_Password, "WiFi Station (STA) Password." },
-    { Setting_Hostname, "Network hostname." },
+    { Setting_Hostname3, "Network hostname." },
 //    { Setting_IpMode, "IP Mode." },
-    { Setting_IpAddress, "Static IP address." },
-    { Setting_Gateway, "Static gateway address." },
-    { Setting_NetMask, "Static netmask." },
+    { Setting_IpAddress3, "Static IP address." },
+    { Setting_Gateway3, "Static gateway address." },
+    { Setting_NetMask3, "Static netmask." },
 #if WIFI_SOFTAP
     { Setting_WifiMode, "WiFi Mode." },
     { Setting_WiFi_AP_SSID, "WiFi Access Point (AP) SSID." },
     { Setting_WiFi_AP_Password, "WiFi Access Point (AP) Password." },
+    { Setting_Wifi_AP_Country, "ISO3166 country code, controls availability of channels 12-14.\\n"
+                               "Set to ""01"" for generic worldwide channels." },
+    { Setting_Wifi_AP_Channel, "WiFi Access Point (AP) channel to use.\\n May be overridden when connecting to an Access Point as station or by country setting." },
     { Setting_Hostname2, "Network hostname." },
     { Setting_IpAddress2, "Static IP address." },
     { Setting_Gateway2, "Static gateway address." },
@@ -786,18 +931,24 @@ static const setting_descr_t ethernet_settings_descr[] = {
     { Setting_WifiMode, "WiFi Mode." },
 #endif
 #if TELNET_ENABLE
-    { Setting_TelnetPort, "(Raw) Telnet port number listening for incoming connections." },
+    { Setting_TelnetPort3, "(Raw) Telnet port number listening for incoming connections." },
 #endif
 #if FTP_ENABLE
-    { Setting_FtpPort, "FTP port number listening for incoming connections." },
+    { Setting_FtpPort3, "FTP port number listening for incoming connections." },
 #endif
 #if HTTP_ENABLE
-    { Setting_HttpPort, "HTTP port number listening for incoming connections." },
+    { Setting_HttpPort3, "HTTP port number listening for incoming connections." },
 #endif
 #if WEBSOCKET_ENABLE
-    { Setting_WebSocketPort, "Websocket port number listening for incoming connections."
-                             "NOTE: WebUI requires this to be HTTP port number + 1."
-    }
+    { Setting_WebSocketPort3, "Websocket port number listening for incoming connections."
+                              "NOTE: WebUI requires this to be HTTP port number + 1."
+    },
+#endif
+#if MQTT_ENABLE
+    { Setting_MQTTBrokerIpAddress, "IP address for remote MQTT broker. Set to 0.0.0.0 to disable connection." },
+    { Setting_MQTTBrokerPort, "Remote MQTT broker portnumber." },
+    { Setting_MQTTBrokerUserName, "Remote MQTT broker username." },
+    { Setting_MQTTBrokerPassword, "Remote MQTT broker password." },
 #endif
 };
 
@@ -831,25 +982,25 @@ static status_code_t wifi_set_int (setting_id_t setting, uint_fast16_t value)
             break;
 
 #if TELNET_ENABLE
-        case Setting_TelnetPort:
+        case Setting_TelnetPort3:
             wifi.sta.network.telnet_port = wifi.ap.network.telnet_port = (uint16_t)value;
             break;
 #endif
 
 #if FTP_ENABLE
-        case Setting_FtpPort:
+        case Setting_FtpPort3:
             wifi.sta.network.ftp_port = wifi.ap.network.ftp_port = (uint16_t)value;
             break;
 #endif
 
 #if HTTP_ENABLE
-        case Setting_HttpPort:
+        case Setting_HttpPort3:
             wifi.sta.network.http_port = wifi.ap.network.http_port = (uint16_t)value;
             break;
 #endif
 
 #if WEBSOCKET_ENABLE
-        case Setting_WebSocketPort:
+        case Setting_WebSocketPort3:
             wifi.sta.network.websocket_port = wifi.ap.network.websocket_port = (uint16_t)value;
             break;
 #endif
@@ -871,25 +1022,25 @@ static uint_fast16_t wifi_get_int (setting_id_t setting)
             break;
 
 #if TELNET_ENABLE
-        case Setting_TelnetPort:
+        case Setting_TelnetPort3:
             value = wifi.sta.network.telnet_port;
             break;
 #endif
 
 #if FTP_ENABLE
-        case Setting_FtpPort:
+        case Setting_FtpPort3:
             value = wifi.sta.network.ftp_port;
             break;
 #endif
 
 #if HTTP_ENABLE
-        case Setting_HttpPort:
+        case Setting_HttpPort3:
             value = wifi.sta.network.http_port;
             break;
 #endif
 
 #if WEBSOCKET_ENABLE
-        case Setting_WebSocketPort:
+        case Setting_WebSocketPort3:
             value = wifi.sta.network.websocket_port;
             break;
 #endif
@@ -911,17 +1062,23 @@ static status_code_t wifi_set_ip (setting_id_t setting, char *value)
 
     switch(setting) {
 
-        case Setting_IpAddress:
+        case Setting_IpAddress3:
             set_addr(wifi.sta.network.ip, &addr);
             break;
 
-        case Setting_Gateway:
+        case Setting_Gateway3:
             set_addr(wifi.sta.network.gateway, &addr);
             break;
 
-        case Setting_NetMask:
+        case Setting_NetMask3:
             set_addr(wifi.sta.network.mask, &addr);
             break;
+
+#if MQTT_ENABLE
+        case Setting_MQTTBrokerIpAddress:
+            set_addr(wifi.sta.network.mqtt.ip, &addr);
+            break;
+#endif
 
 #if WIFI_SOFTAP
 
@@ -953,17 +1110,23 @@ static char *wifi_get_ip (setting_id_t setting)
 
     switch(setting) {
 
-        case Setting_IpAddress:
+        case Setting_IpAddress3:
             inet_ntop(AF_INET, &wifi.sta.network.ip, ip, INET6_ADDRSTRLEN);
             break;
 
-        case Setting_Gateway:
+        case Setting_Gateway3:
             inet_ntop(AF_INET, &wifi.sta.network.gateway, ip, INET6_ADDRSTRLEN);
             break;
 
-        case Setting_NetMask:
+        case Setting_NetMask3:
             inet_ntop(AF_INET, &wifi.sta.network.mask, ip, INET6_ADDRSTRLEN);
             break;
+
+#if MQTT_ENABLE
+        case Setting_MQTTBrokerIpAddress:
+            inet_ntop(AF_INET, &wifi.sta.network.mqtt.ip, ip, INET6_ADDRSTRLEN);
+            break;
+#endif
 
 #if WIFI_SOFTAP
 
@@ -999,18 +1162,18 @@ static void wifi_settings_restore (void)
 
 // Station
 
-    strlcpy(wifi.sta.network.hostname, NETWORK_HOSTNAME, sizeof(wifi.sta.network.hostname));
+    strlcpy(wifi.sta.network.hostname, NETWORK_STA_HOSTNAME, sizeof(wifi.sta.network.hostname));
 
-    wifi.sta.network.ip_mode = (ip_mode_t)NETWORK_IPMODE;
+    wifi.sta.network.ip_mode = (ip_mode_t)NETWORK_STA_IPMODE;
 
-    if(inet_pton(AF_INET, NETWORK_IP, &addr) == 1)
+    if(inet_pton(AF_INET, NETWORK_STA_IP, &addr) == 1)
         set_addr(wifi.sta.network.ip, &addr);
 
-    if(inet_pton(AF_INET, NETWORK_GATEWAY, &addr) == 1)
+    if(inet_pton(AF_INET, NETWORK_STA_GATEWAY, &addr) == 1)
         set_addr(wifi.sta.network.gateway, &addr);
 
 #if NETWORK_IPMODE == 0
-    if(inet_pton(AF_INET, NETWORK_MASK, &addr) == 1)
+    if(inet_pton(AF_INET, NETWORK_STA_MASK, &addr) == 1)
         set_addr(wifi.sta.network.mask, &addr);
  #else
     if(inet_pton(AF_INET, "255.255.255.0", &addr) == 1)
@@ -1023,8 +1186,8 @@ static void wifi_settings_restore (void)
 
     wifi.ap.network.ip_mode = IpMode_Static;
     strlcpy(wifi.ap.network.hostname, NETWORK_AP_HOSTNAME, sizeof(wifi.ap.network.hostname));
-    strlcpy(wifi.ap.ssid, WIFI_AP_SSID, sizeof(wifi.ap.ssid));
-    strlcpy(wifi.ap.password, WIFI_AP_PASSWORD, sizeof(wifi.ap.password));
+    strlcpy(wifi.ap.ssid, NETWORK_AP_SSID, sizeof(wifi.ap.ssid));
+    strlcpy(wifi.ap.password, NETWORK_AP_PASSWORD, sizeof(wifi.ap.password));
 
     if(inet_pton(AF_INET, NETWORK_AP_IP, &addr) == 1)
         set_addr(wifi.ap.network.ip, &addr);
@@ -1045,6 +1208,24 @@ static void wifi_settings_restore (void)
     wifi.sta.network.websocket_port = wifi.ap.network.websocket_port = NETWORK_WEBSOCKET_PORT;
     wifi.sta.network.services = wifi.ap.network.services = allowed_services;
 
+#if MQTT_ENABLE
+
+    wifi.sta.network.mqtt.port = NETWORK_MQTT_PORT;
+
+  #ifdef MQTT_IP_ADDRESS
+    if(ip4addr_aton(MQTT_IP_ADDRESS, &addr) == 1)
+        set_addr(wifi.sta.network.mqtt.ip, &addr);
+  #endif
+
+ #ifdef MQTT_USERNAME
+    strcpy(wifi.sta.network.mqtt.user, MQTT_USERNAME);
+ #endif
+ #ifdef MQTT_PASSWORD
+    strcpy(wifi.sta.network.mqtt.password, MQTT_PASSWORD);
+ #endif
+
+#endif
+
     hal.nvs.memcpy_to_nvs(nvs_address, (uint8_t *)&wifi, sizeof(wifi_settings_t), true);
 }
 
@@ -1053,8 +1234,24 @@ static void wifi_settings_load (void)
     if(hal.nvs.memcpy_from_nvs((uint8_t *)&wifi, nvs_address, sizeof(wifi_settings_t), true) != NVS_TransferResult_OK)
         wifi_settings_restore();
 
+    if(wifi.ap.channel == 0 || wifi.ap.channel > 13)
+        wifi.ap.channel = 1;
+
+    if(!validate_country_code(wifi.ap.country))
+        strcpy(wifi.ap.country, country_codes[0]);
+
     wifi.sta.network.services.mask &= allowed_services.mask;
     wifi.ap.network.services.mask &= allowed_services.mask;
+
+    if(wifi.sta.network.services.http &&
+        wifi.sta.network.services.websocket &&
+         wifi.sta.network.websocket_port == wifi.sta.network.http_port)
+        wifi.sta.network.websocket_port++;
+
+    if(wifi.ap.network.services.http &&
+        wifi.ap.network.services.websocket &&
+         wifi.ap.network.websocket_port == wifi.ap.network.http_port)
+        wifi.ap.network.websocket_port++;
 }
 
 static void stream_changed (stream_type_t type)
@@ -1076,6 +1273,10 @@ bool wifi_init (void)
         on_stream_changed = grbl.on_stream_changed;
         grbl.on_stream_changed = stream_changed;
 
+#if MQTT_ENABLE
+        on_client_connected = mqtt_events.on_client_connected;
+        mqtt_events.on_client_connected = mqtt_connection_changed;
+#endif
         settings_register(&setting_details);
 
         allowed_services.mask = networking_get_services_list((char *)netservices).mask;
@@ -1085,4 +1286,3 @@ bool wifi_init (void)
 }
 
 #endif // WIFI_ENABLE
-

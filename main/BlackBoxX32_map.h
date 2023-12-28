@@ -30,14 +30,16 @@
 
 #define BOARD_NAME "BlackBox X32"
 #define BOARD_URL "https://docs.openbuilds.com/doku.php?id=docs:blackbox-x32:start"
-#define HAS_IOPORTS
+#if N_AUTO_SQUARED || N_AXIS > 3
+#define HAS_BOARD_INIT
+#endif
 
 // timer definitions
 #define STEP_TIMER_GROUP TIMER_GROUP_0
 #define STEP_TIMER_INDEX TIMER_0
 
 // Stepper Driver Pins
-#define STEPPERS_ENABLE_PIN	  GPIO_NUM_17
+#define STEPPERS_ENABLE_PIN   GPIO_NUM_17
 
 #define X_STEP_PIN            GPIO_NUM_12
 #define X_DIRECTION_PIN       GPIO_NUM_14
@@ -54,11 +56,13 @@
   #define M3_STEP_PIN         GPIO_NUM_33
   #define M3_DIRECTION_PIN    GPIO_NUM_32
  #if N_AUTO_SQUARED
-  #define M3_LIMIT_PIN        GPIO_NUM_22
-  #if PROBE_ENABLE
-   #warning "Probe input is not available when an auto-squared axis is enabled."
-   #undef PROBE_ENABLE
-   #define PROBE_ENABLE 0
+// add limit pin definitions to stop compiler complaints (from preprocessor).
+  #if X_AUTO_SQUARE
+   #define M3_LIMIT_PIN       GPIO_NUM_35 // Same as X limit, switched to Z by board code during homing.
+  #elif Y_AUTO_SQUARE
+   #define M3_LIMIT_PIN       GPIO_NUM_34 // Same as Y limit, switched to Z by board code during homing.
+  #else
+   #define M3_LIMIT_PIN       GPIO_NUM_39 // Same as Z limit, switched to X by board code during homing.
   #endif
  #endif
 #endif
@@ -74,38 +78,52 @@
   #define PROBE_PIN           GPIO_NUM_22
 #endif
 
-// Define spindle enable and spindle direction output pins.
-#define SPINDLE_ENABLE_PIN    GPIO_NUM_13
-#define SPINDLEPWMPIN         GPIO_NUM_25
-#define SPINDLE_DIRECTION_PIN GPIO_NUM_4
+// Define driver spindle pins
+
+#if DRIVER_SPINDLE_PWM_ENABLE
+#define SPINDLE_PWM_PIN         GPIO_NUM_25
+#else
+#define AUXOUTPUT0_PIN          GPIO_NUM_25
+#endif
+
+#if DRIVER_SPINDLE_DIR_ENABLE
+#define SPINDLE_DIRECTION_PIN   GPIO_NUM_4
+#else
+#define AUXOUTPUT1_PIN          GPIO_NUM_4
+#endif
+
+#if DRIVER_SPINDLE_ENABLE
+#define SPINDLE_ENABLE_PIN      GPIO_NUM_13
+#else
+#define AUXOUTPUT2_PIN          GPIO_NUM_13
+#endif
 
 // Define flood and mist coolant enable output pins.
 // Only one can be enabled!
-#define COOLANT_FLOOD_PIN     GPIO_NUM_21 // coolant
-//#define COOLANT_MIST_PIN      GPIO_NUM_21 // or mist
+#define COOLANT_FLOOD_PIN   GPIO_NUM_21 // coolant
+//#define COOLANT_MIST_PIN  GPIO_NUM_21 // or mist
 
 // Define user-control CONTROLs (cycle start, reset, feed hold) input pins.
 #if SAFETY_DOOR_ENABLE
-  #define SAFETY_DOOR_PIN     GPIO_NUM_16
+  #define SAFETY_DOOR_PIN   GPIO_NUM_16
+#else
+  #define AUXINPUT1_PIN     GPIO_NUM_16
 #endif
 
-
-#ifdef HAS_IOPORTS
-#define AUXINPUT0_PIN         GPIO_NUM_0 // Mode button on front panel
-#endif
+#define AUXINPUT0_PIN       GPIO_NUM_0 // Mode button on front panel
 
 // Pin mapping when using SPI mode.
 // With this mapping, SD card can be used both in SPI and 1-line SD mode.
 // Note that a pull-up on CS line is required in SD mode.
-#define PIN_NUM_MISO          GPIO_NUM_19
-#define PIN_NUM_MOSI          GPIO_NUM_23
-#define PIN_NUM_CLK           GPIO_NUM_18
+#define PIN_NUM_MISO        GPIO_NUM_19
+#define PIN_NUM_MOSI        GPIO_NUM_23
+#define PIN_NUM_CLK         GPIO_NUM_18
 //
 // #if SDCARD_ENABLE
-#define PIN_NUM_CS            GPIO_NUM_5
+#define PIN_NUM_CS          GPIO_NUM_5
 // #endif
 
-#if MODBUS_ENABLE
+#if MODBUS_ENABLE & MODBUS_RTU_ENABLED
 #error BlackBox X32 does not support Modbus
 #endif
 
